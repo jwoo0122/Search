@@ -20,8 +20,9 @@ import WebKit
 struct Space: Codable, Identifiable, Equatable {
     var id: UUID
     var name: String
-    /// Which of `Spaces.colours` — from before spaces had icons; kept so an
-    /// older list still reads.
+    /// Which of `Spaces.colours` its icon wears, so a glance at the dot
+    /// says which space this is. 0 is none, the grey every space had: the
+    /// field dates from before icons, and every list from then reads 0.
     var colour: Int
     /// Its icon, one of `Spaces.icons`.
     var icon: String?
@@ -46,18 +47,41 @@ struct Space: Codable, Identifiable, Equatable {
     /// The icon it shows: its own, or a house for the first and a
     /// briefcase for any other that has none yet.
     var symbol: String { icon.flatMap { Spaces.icons.contains($0) ? $0 : nil } ?? (isFirst ? "house" : "briefcase") }
+
+    /// Its colour, or nil for none — an index out of range from a newer
+    /// Search included.
+    var tint: Color? { colour > 0 && Spaces.colours.indices.contains(colour) ? Spaces.colours[colour] : nil }
 }
 
 enum Spaces {
+    /// A handful, picked to read on the light ground and the dark one
+    /// alike. The first stands for none and is never drawn.
     static let colours: [Color] = [
-        Color(red: 0.45, green: 0.47, blue: 0.52), // slate
+        Color(red: 0.45, green: 0.47, blue: 0.52), // none
         Color(red: 0.26, green: 0.52, blue: 0.96), // blue
         Color(red: 0.20, green: 0.66, blue: 0.45), // green
         Color(red: 0.96, green: 0.62, blue: 0.20), // orange
         Color(red: 0.90, green: 0.33, blue: 0.40), // red
         Color(red: 0.62, green: 0.40, blue: 0.90), // violet
     ]
-    static let colourNames = ["Slate", "Blue", "Green", "Orange", "Red", "Violet"]
+    static let colourNames = ["None", "Blue", "Green", "Orange", "Red", "Violet"]
+
+    /// How much of a space's colour the chrome behind the tabs wears: the
+    /// column, the strip, the bookmarks bar and the ground around the page's
+    /// card, never the page. Faint, as Arc's space themes are: enough to
+    /// tell at the edge of the eye which space this is, not so much that a
+    /// tab's grey or a title's ink reads any differently. The dark ground
+    /// swallows more of a colour, so it takes a little more.
+    static let washLight = 0.07
+    static let washDark = 0.11
+
+    /// The wash for colour COLOUR, or nil for none: no colour, or an index
+    /// out of range from a newer Search. Nil draws nothing at all, so a
+    /// space without a colour looks exactly as every space did before.
+    static func wash(_ colour: Int?, dark: Bool) -> Double? {
+        guard let colour, colour > 0, colours.indices.contains(colour) else { return nil }
+        return dark ? washDark : washLight
+    }
 
     /// The icons a space can wear: Apple's own symbols, drawn in one weight
     /// and one grey, grouped as work, thinking, leisure and life.
@@ -306,6 +330,13 @@ struct Parked {
 extension Browser {
     var space: Space { spaces.first { $0.id == spaceID } ?? spaces[0] }
 
+    /// The colour the chrome is washed with (see Spaces.wash): the space on
+    /// screen's, so it follows a swipe, ⌃1–⌃9 and the profile shown. None
+    /// with spaces off, and while a new one is being made, as the dot has.
+    var washColour: Int? {
+        prefs.usesSpaces && !makingSpace && space.tint != nil ? space.colour : nil
+    }
+
     /// Every tab of the spaces not on screen, for the sleep timer.
     var parkedTabs: [Tab] { parked.values.flatMap(\.tabs) }
 
@@ -339,6 +370,9 @@ extension Browser {
             makingSpace = false
         }
         guard id != spaceID else { return }
+        // A peek that stays with its tab belongs to a tab on this space. The
+        // next space doesn't keep that page running out of sight.
+        if prefs.peekStays, peekTab != nil { closePeek() }
         cancelTabEdit()
         let returningVideo = parked[id].map { row in
             guard let active = row.active else { return false }
@@ -492,6 +526,12 @@ extension Browser {
         Spaces.write(spaces, profile: profileID)
     }
 
+    func setSpaceColour(_ id: UUID, to colour: Int) {
+        guard let at = spaces.firstIndex(where: { $0.id == id }), Spaces.colours.indices.contains(colour) else { return }
+        spaces[at].colour = colour
+        Spaces.write(spaces, profile: profileID)
+    }
+
     func setSpaceDownloads(_ id: UUID, to folder: URL?) {
         guard let at = spaces.firstIndex(where: { $0.id == id }) else { return }
         spaces[at].downloads = folder?.path
@@ -539,6 +579,25 @@ extension Browser {
 /// tabs in the row. One icon however many spaces there are; a click opens
 /// the menu. When the space changes the icon turns over the way the spaces
 /// went — out on one side, the next one in from the other.
+/// A space's colour laid faintly over the chrome's own ground. Handed the
+/// colour rather than the browser, so it is drawn again only when the
+/// colour changes, not on everything the browser announces. A change
+/// crossfades once and is done: nothing runs while it stays.
+struct SpaceWash: View {
+    let colour: Int?
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        ZStack {
+            if let colour, let opacity = Spaces.wash(colour, dark: scheme == .dark) {
+                Spaces.colours[colour].opacity(opacity)
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(Motion.quick, value: colour)
+    }
+}
+
 struct SpaceDot: View {
     @ObservedObject var browser: Browser
     @State private var hovering = false
@@ -554,13 +613,15 @@ struct SpaceDot: View {
 
     private var symbol: String { browser.makingSpace ? "plus" : browser.space.symbol }
     private var key: String { browser.makingSpace ? "new" : "\(browser.spaceID.uuidString)-\(browser.space.symbol)" }
+    /// The space's colour, if it has one; none while a new one is being made.
+    private var tint: Color? { browser.makingSpace ? nil : browser.space.tint }
 
     var body: some View {
         Button { SpaceMenu.show(for: browser) } label: {
             ZStack {
                 Image(systemName: shown?.symbol ?? symbol)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(hovering ? Palette.ink : Palette.muted)
+                    .foregroundStyle(tint ?? (hovering ? Palette.ink : Palette.muted))
                     .id(shown?.key ?? key)
                     // The way the tabs go: sideways in the column; in the bar
                     // across the top, up for the next space, down going back.
@@ -571,13 +632,16 @@ struct SpaceDot: View {
             .frame(width: SpaceDot.width, height: 26)
             .clipped()
             .background(
+                // A coloured space's dot sits on a wash of its colour, enough
+                // to tell spaces apart at the edge of the eye.
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(hovering ? Palette.hover : .clear)
+                    .fill(tint.map { $0.opacity(hovering ? 0.24 : 0.14) } ?? (hovering ? Palette.hover : .clear))
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .animation(Motion.quick, value: browser.space.colour)
         .help("\(browser.space.name) — ⌃1–⌃9, or two fingers \(browser.prefs.sidebar ? "sideways" : "up or down") over the tabs, to switch")
         .onChange(of: key) { _, now in
             let symbol = symbol
@@ -647,6 +711,31 @@ enum SpaceMenu {
         return item
     }
 
+    /// A space's icon for the menu, in its colour if it has one.
+    private static func image(_ symbol: String, colour: Int) -> NSImage? {
+        let plain = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        guard colour > 0, Spaces.colours.indices.contains(colour) else { return plain }
+        return plain?.withSymbolConfiguration(.init(paletteColors: [NSColor(Spaces.colours[colour])]))
+    }
+
+    /// A dot of the colour for the Colour menu; an empty ring for none.
+    private static func swatch(_ colour: Int) -> NSImage {
+        let image = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            let dot = NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1))
+            if colour > 0, Spaces.colours.indices.contains(colour) {
+                NSColor(Spaces.colours[colour]).setFill()
+                dot.fill()
+            } else {
+                NSColor.secondaryLabelColor.setStroke()
+                dot.lineWidth = 1
+                dot.stroke()
+            }
+            return true
+        }
+        image.accessibilityDescription = Spaces.colourNames.indices.contains(colour) ? Spaces.colourNames[colour] : nil
+        return image
+    }
+
     static func show(for browser: Browser) {
         menu(for: browser).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
@@ -669,7 +758,7 @@ enum SpaceMenu {
                 let entry = item(space.name, key: index < 9 ? "\(index + 1)" : "", checked: space.id == browser.spaceID) {
                     browser.switchSpace(to: space.id)
                 }
-                entry.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
+                entry.image = image(space.symbol, colour: space.colour)
                 menu.addItem(entry)
                 index += 1
             }
@@ -699,6 +788,18 @@ enum SpaceMenu {
         let icon = NSMenuItem(title: "Icon", action: nil, keyEquivalent: "")
         icon.submenu = icons
         menu.addItem(icon)
+        let colours = NSMenu()
+        for (index, name) in Spaces.colourNames.enumerated() {
+            let choice = item(name, checked: here.colour == index || (index == 0 && here.tint == nil)) {
+                browser.setSpaceColour(here.id, to: index)
+            }
+            choice.image = swatch(index)
+            colours.addItem(choice)
+            if index == 0 { colours.addItem(.separator()) }
+        }
+        let colour = NSMenuItem(title: "Colour", action: nil, keyEquivalent: "")
+        colour.submenu = colours
+        menu.addItem(colour)
         // The order is the swipe's, and ⌃1–⌃9's.
         if let at = browser.spaces.firstIndex(where: { $0.id == here.id }) {
             if at > 0 { menu.addItem(item("Move Left") { browser.moveSpace(here.id, to: at - 1) }) }
@@ -790,6 +891,15 @@ enum Ask {
             guard ok, !name.isEmpty else { cancelled(); return }
             then(name, fresh.state != .on)
         }
+    }
+
+    /// Something to say, with nothing to answer but OK.
+    static func tell(_ title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.addButton(withTitle: "OK")
+        show(alert) { _ in }
     }
 
     /// `returnCancels`: Return is Cancel's, for a yes that can't be undone.

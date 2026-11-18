@@ -13,8 +13,46 @@ import WebKit
 // it there, with nothing loaded twice.
 
 extension Browser {
+    /// Shown. With Settings › Keyboard & Mouse › Peek stays with its tab on,
+    /// only while the tab it was opened from is on screen: another tab
+    /// hides it, and coming back shows it again. Off, another tab puts it
+    /// away (see select), so a peek is always in front.
+    var peekInFront: Bool {
+        guard peekTab != nil else { return false }
+        guard prefs.peekStays, let peekFrom else { return true }
+        return visibleTabIDs.contains(peekFrom)
+    }
+
+    /// A peek hidden behind another tab (see peekInFront) is out of sight,
+    /// so it plays and hears nothing: its video and sound wait, its camera
+    /// and microphone are muted, and all of it goes on when it is in front
+    /// again, with any question it asked meanwhile (see ask(from:)). A
+    /// camera or microphone question already up for it is answered no:
+    /// left over the tab in front, it would pass for that tab's. Told
+    /// whenever the tab in front, the pairs, Split View or the setting
+    /// changes.
+    func followPeek() {
+        guard let page = peekTab else { return }
+        let shown = peekInFront
+        if let web = page.built {
+            web.setAllMediaPlaybackSuspended(!shown) {}
+            // A view out of its window goes on capturing (see Tab.close).
+            // Search mutes capture nowhere else, so unmuting gives back
+            // only what this took.
+            let from: WKMediaCaptureState = shown ? .muted : .active
+            let to: WKMediaCaptureState = shown ? .active : .muted
+            if web.cameraCaptureState == from { web.setCameraCaptureState(to) {} }
+            if web.microphoneCaptureState == from { web.setMicrophoneCaptureState(to) {} }
+        }
+        if !shown { settleCapture(for: page) }
+        if shown, let held = heldDialogs.removeValue(forKey: page.id) {
+            DispatchQueue.main.async { held.forEach { $0.present() } }
+        }
+    }
+
     /// A modified click on a link, from a tab in the row.
     func peek(_ url: URL, from tab: Tab) {
+        if peekTab != nil { closePeek() }
         if tab.pin != nil, let host = url.host()?.lowercased() { tab.peeked = (Vault.registrable(host), Date()) }
         // On the window's space, as the other new tabs are, so a peek has the
         // same sign-ins as the tab it came from rather than the front
@@ -37,7 +75,7 @@ extension Browser {
     /// the site go as they always have, so moving about Gmail or Notion
     /// stays in the pin.
     func peeksFromPin(_ url: URL, in tab: Tab, on page: URL?) -> Bool {
-        guard prefs.pinsPeek, tab.pin != nil, peekTab == nil, Browser.peekable(url),
+        guard prefs.pinsPeek, tab.pin != nil, !peekInFront, Browser.peekable(url),
               let there = url.host()?.lowercased(),
               let here = page?.host()?.lowercased()
         else { return false }
@@ -55,6 +93,7 @@ extension Browser {
     /// so the page loads into it and the one that asked keeps it as its
     /// opener. The click was checked before (see createWebViewWith).
     func peekWindow(_ configuration: WKWebViewConfiguration, from tab: Tab, going url: URL) -> Tab {
+        if peekTab != nil { closePeek() }
         let page = Tab(shy: tab.shy, configuration: configuration)
         prepare(page)
         page.opener = tab.id
@@ -82,29 +121,58 @@ extension Browser {
     /// Put away: the page goes with the panel.
     func closePeek() {
         guard let page = peekTab else { return }
+        peekPinch = 0
+        peekFill = false
         withAnimation(Motion.quick) {
             peekTab = nil
             peekFrom = nil
         }
+        heldDialogs.removeValue(forKey: page.id)?.forEach { $0.dismiss() }
+        settleCapture(for: page)
         page.close()
+    }
+
+    /// A pinch spread past the line: the panel grows to the page's size,
+    /// and once there it is the tab, in place — the zoom seen to its end.
+    func openPeekGrown() {
+        guard peekTab != nil, !peekFill else { return }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            peekPinch = 0
+            return keepPeek(instant: true)
+        }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.92)) {
+            peekFill = true
+            peekPinch = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, self.peekFill else { return }
+            self.keepPeek(instant: true)
+        }
     }
 
     /// Kept: a tab beside the one it was opened from, and in front. With
     /// Split View on, `beside` keeps it in a pair with that page instead —
     /// the page and what it linked to, side by side.
-    func keepPeek(beside: Bool = false) {
+    func keepPeek(beside: Bool = false, instant: Bool = false) {
         guard let page = peekTab else { return }
-        let from = active
+        // The tab it was opened from, which in a pair need not be the one
+        // in front: kept, it goes beside that one, in its group.
+        let from = peekFrom.flatMap { id in tabs.first { $0.id == id } } ?? active
         let place = placeForNew()
         // Kept from a grouped tab, it joins that group, as a link opened
         // from there does (see open).
-        if prefs.usesTabGroups, !page.shy, let from = active { page.groupID = from.groupID }
-        withAnimation(Motion.quick) {
+        if prefs.usesTabGroups, !page.shy, let from { page.groupID = from.groupID }
+        // Grown to the page already (a pinch, see openPeekGrown): it simply
+        // becomes the tab, with no fade or shrink in between.
+        var change = Transaction(animation: instant ? nil : Motion.quick)
+        change.disablesAnimations = instant
+        withTransaction(change) {
             peekTab = nil
             peekFrom = nil
+            peekFill = false
         }
         insert(page, at: place)
-        if beside, prefs.splitView, let from, canSplit(page, with: from) {
+        if beside, prefs.splitView, let from, canJoin(page, beside: from) {
             pair(page, with: from, onLeft: false)
         } else {
             select(page)
@@ -120,13 +188,13 @@ struct PeekLayer: View {
         ZStack {
             // The dimming only fades. Grown and shrunk with the panel, its
             // edges travelled across the window as it came (Drice, 24 Sep 2026).
-            if browser.peekTab != nil {
+            if browser.peekInFront {
                 Color.black.opacity(0.22)
                     .contentShape(Rectangle())
                     .onTapGesture { browser.closePeek() }
                     .transition(.opacity)
             }
-            if let tab = browser.peekTab {
+            if browser.peekInFront, let tab = browser.peekTab {
                 PeekPanel(browser: browser, tab: tab)
                     .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
@@ -138,6 +206,10 @@ struct PeekLayer: View {
 struct PeekPanel: View {
     @ObservedObject var browser: Browser
     @ObservedObject var tab: Tab
+
+    /// Grown to the page it is about to become (Browser.peekFill), it wears
+    /// the page's corners, so nothing changes when it becomes the tab.
+    private var corner: CGFloat { browser.peekFill ? (browser.asCards ? Metrics.cardRadius : 0) : 12 }
 
     var body: some View {
         GeometryReader { geo in
@@ -153,13 +225,13 @@ struct PeekPanel: View {
                                 PeekSkeleton().transition(.opacity.animation(Motion.quick))
                             }
                         }
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            RoundedRectangle(cornerRadius: corner, style: .continuous)
                                 .strokeBorder(Palette.hairline, lineWidth: 1)
                         )
                         .shadow(color: .black.opacity(0.25), radius: 30, y: 10)
-                    VStack(spacing: 8) {
+                    if !browser.peekFill { VStack(spacing: 8) {
                         Knob("xmark", help: "Close (esc)") { browser.closePeek() }
                         // ⌥ on it keeps the page beside this one, with Split
                         // View on, as the button under it does.
@@ -169,10 +241,11 @@ struct PeekPanel: View {
                         if browser.prefs.splitView {
                             Knob("rectangle.split.2x1", help: "Keep beside this page (⌥⌘↩)") { browser.keepPeek(beside: true) }
                         }
-                    }
+                    } }
                 }
-                .frame(width: geo.size.width * 0.82, height: geo.size.height * 0.86)
-                .offset(x: 21)
+                .frame(width: geo.size.width * (browser.peekFill ? 1 : 0.82), height: geo.size.height * (browser.peekFill ? 1 : 0.86))
+                .offset(x: browser.peekFill ? 0 : 21)
+                .scaleEffect(browser.peekFill ? 1 : 1 + 0.04 * browser.peekPinch)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }

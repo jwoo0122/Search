@@ -135,6 +135,7 @@ enum Web {
         }
         if Store.testing, !Store.measuring { config.preferences.inactiveSchedulingPolicy = .none }
         inspector(config.preferences)
+        backspaceStays(config.preferences)
         NativePiP.allow(config.preferences)
         return config
     }
@@ -165,6 +166,15 @@ enum Web {
         guard preferences.responds(to: set) else { return }
         typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
         unsafeBitCast(preferences.method(for: set), to: Setter.self)(preferences, set, on)
+    }
+
+    /// WebKit's ⌫ as Back and ⇧⌫ as Forward, off as in Safari. Back is ⌘[,
+    /// or what Settings gives it.
+    static func backspaceStays(_ preferences: WKPreferences) {
+        let set = NSSelectorFromString("_setBackspaceKeyNavigationEnabled:")
+        guard preferences.responds(to: set) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(preferences.method(for: set), to: Setter.self)(preferences, set, false)
     }
 }
 
@@ -759,6 +769,9 @@ final class Tab: ObservableObject, Identifiable {
     /// Drawn as a square while Settings › Tabs › Pinned rows is off, or
     /// with the tabs across the top.
     @Published var listed = false
+    /// For a pinned row, the folder among the rows that holds it (see
+    /// PinFolders.swift). Set when the row is built, from pins.json.
+    var pinFolder: UUID?
 
     /// The group that holds this ordinary tab in the sidebar.
     @Published var groupID: UUID? {
@@ -1195,6 +1208,12 @@ final class Tab: ObservableObject, Identifiable {
         scripts += YouTubeAds.scripts(for: Dusk.host(of: url ?? pageAddress))
         if !css.isEmpty {
             add(Veiling.style(css), .atDocumentStart, mainFrameOnly: true, in: Web.world)
+        }
+        // Your own style for this site, the same way and in the same place:
+        // only with the setting on, and only a site you wrote one for (see
+        // SiteStyles.swift).
+        if let style = SiteStyles.shared.css(on: SiteStyles.host(of: url ?? pageAddress)) {
+            add(SiteStyles.script(style), .atDocumentStart, mainFrameOnly: true, in: Web.world)
         }
         // The same scripts as the document before's, the usual case, are
         // left where they are: taken out and put back, every one was sent to
@@ -2292,6 +2311,52 @@ final class MiddleRelay: NSObject, WKScriptMessageHandler {
 final class PageView: WKWebView {
     var onMenuClosed: (() -> Void)?
 
+    /// Two fingers spread on a peek open it as a tab, as zooming into it
+    /// would make it bigger: the panel grows a little with the fingers, the
+    /// trackpad taps once when letting go would open it, and lighter when
+    /// the fingers come back under that. Only while the page isn't zoomed
+    /// in: a page already zoomed takes its pinch as it always did.
+    private var peekSpread: CGFloat = 0
+    private var peekArmed = false
+    static let peekOpens: CGFloat = 0.3
+
+    override func magnify(with event: NSEvent) {
+        if !peekPinch(event.phase, by: event.magnification) { super.magnify(with: event) }
+    }
+
+    /// One step of a pinch on this page: false when it isn't a peek's to
+    /// take, and the page zooms as usual. Also how a test pinches.
+    @discardableResult
+    func peekPinch(_ phase: NSEvent.Phase, by amount: CGFloat) -> Bool {
+        guard let browser = Browsers.all.first(where: { $0.peekTab?.web === self }),
+              magnification <= 1.001 || peekSpread != 0 else { return false }
+        switch phase {
+        case .began:
+            peekSpread = 0
+            peekArmed = false
+        case .changed:
+            peekSpread += amount
+            let armed = peekSpread >= PageView.peekOpens
+            if armed != peekArmed {
+                NSHapticFeedbackManager.defaultPerformer.perform(armed ? .levelChange : .alignment, performanceTime: .now)
+                peekArmed = armed
+            }
+            browser.peekPinch = max(0, min(1, peekSpread / PageView.peekOpens))
+        case .ended, .cancelled:
+            let open = peekArmed && phase == .ended
+            peekSpread = 0
+            peekArmed = false
+            if open {
+                browser.openPeekGrown()
+            } else {
+                withAnimation(Motion.quick) { browser.peekPinch = 0 }
+            }
+        default:
+            break
+        }
+        return true
+    }
+
     override func didCloseMenu(_ menu: NSMenu, with event: NSEvent?) {
         super.didCloseMenu(menu, with: event)
         onMenuClosed?()
@@ -2404,6 +2469,13 @@ final class PageView: WKWebView {
             item.target = self
             item.action = #selector(searchSelection(_:))
         }
+        // Inspect Element is WebKit's own, from this menu rather than the
+        // View menu. Handed on, and then the coat, if one was asked for.
+        if let item = menu.items.first(where: { $0.identifier?.rawValue == "WKMenuItemIdentifierInspectElement" }) {
+            inspectItem = (item.target, item.action)
+            item.target = self
+            item.action = #selector(inspectFromPage(_:))
+        }
     }
 
     /// Translate Page to <your language>, or Show Original once it is:
@@ -2451,6 +2523,15 @@ final class PageView: WKWebView {
     })(document)
     """
     private var webSearch: (target: AnyObject?, action: Selector?) = (nil, nil)
+
+    /// WebKit's Inspect Element, handed on so the inspector's coat follows.
+    private var inspectItem: (target: AnyObject?, action: Selector?) = (nil, nil)
+
+    @objc private func inspectFromPage(_ item: NSMenuItem) {
+        guard let action = inspectItem.action else { return }
+        NSApp.sendAction(action, to: inspectItem.target, from: item)
+        browser?.dressInspector(of: self)
+    }
 
     /// WebKit's Open Link in New Window, handed on once the tab it makes is
     /// marked to stay behind. WebKit asks for that tab a moment later, from
@@ -2560,7 +2641,7 @@ final class PageView: WKWebView {
         // panel, which puts the peek away (see Peek.swift); under the column
         // it is nobody's.
         if underCover(event) {
-            if let browser, browser.peekTab != nil, browser.peekTab?.built !== self { browser.closePeek() }
+            if let browser, browser.peekInFront, browser.peekTab?.built !== self { browser.closePeek() }
             return
         }
         onTouch?()
@@ -2791,7 +2872,10 @@ final class PageView: WKWebView {
     /// is a flash of it between a link that opens a tab and the page arriving,
     /// so a fresh view starts unseen, over the window's own ground, and comes
     /// in once WebKit says there is something on it worth seeing.
-    private(set) var unpainted = false
+    var unpainted: Bool { firstFrame != .shown }
+
+    private enum FirstFrame { case shown, held, presenting }
+    private var firstFrame = FirstFrame.shown
 
     /// WebKit says when the first frame is only through names outside the
     /// public framework, so it is asked whether it answers to them first. One
@@ -2801,20 +2885,39 @@ final class PageView: WKWebView {
         guard responds(to: observe) else { return }
         typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
         unsafeBitCast(method(for: observe), to: Setter.self)(self, observe, PageView.firstFrame)
-        unpainted = true
+        firstFrame = .held
         alphaValue = 0
     }
 
     /// In, quickly: the page is there, and the fade only covers the frame
     /// between WebKit laying it out and putting it on screen.
+    ///
+    /// It waits until that frame has reached the window. WebKit reports it a
+    /// few frames earlier, and fading in then showed the view's blank white.
     func showFirstFrame() {
-        guard unpainted else { return }
-        unpainted = false
-        onFirstFrame?()
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = Motion.seconds(PageView.fadeIn)
-            animator().alphaValue = 1
+        guard firstFrame == .held else { return }
+        firstFrame = .presenting
+        afterNextPresentation { [weak self] in
+            guard let self else { return }
+            self.firstFrame = .shown
+            self.onFirstFrame?()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Motion.seconds(PageView.fadeIn)
+                self.animator().alphaValue = 1
+            }
         }
+    }
+
+    /// A web process that dies before it presents never answers, so the
+    /// page comes in after a second regardless, rather than staying unseen.
+    private func afterNextPresentation(_ then: @escaping () -> Void) {
+        let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
+        guard responds(to: presented) else { return then() }
+        var done = false
+        let once = { if !done { done = true; then() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { once() }
+        typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
+        unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
     }
 
     /// How long the page takes to fade in, and so how long a picture over it

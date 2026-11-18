@@ -542,7 +542,11 @@ enum ExtensionShims {
         // from WebKit too, and nothing would reach the extension again. A
         // replacement that still carries them is taken.
         const carries = (v) => { try { return !!(v && v.runtime && v.runtime.id); } catch (e) { return false; } };
-        try { Object.defineProperty(root, key, { configurable: false, enumerable: d.enumerable, get: () => value, set: (v) => { if (carries(v)) value = v; } }); } catch (e) {}
+        // `browser` stays configurable, as WebKit has it: a fixed global
+        // can't be shadowed, and a page whose script starts with its own
+        // `const browser` (Control Panel for YouTube's popup) threw before
+        // a line of it ran. `chrome` alone keeps WebKit's listeners.
+        try { Object.defineProperty(root, key, { configurable: key === "browser", enumerable: d.enumerable, get: () => value, set: (v) => { if (carries(v)) value = v; } }); } catch (e) {}
       }
       // On a web page this is a content script: only Chrome's behaviour is
       // mended there, no API that Chrome doesn't give content scripts either.
@@ -915,14 +919,20 @@ enum ExtensionShims {
         const unreadLimit = 64 * 1024 * 1024;
         const fetch = function fetch(input, init) {
           const self = this, args = arguments;
-          // Read cheaply first: only credentials "include" is the browser's;
-          // any other fetch goes on untouched, its body unread.
+          // Read cheaply first: only credentials "include" is the browser's,
+          // and from a page "same-origin", the default, too: Chrome counts a
+          // granted host as the extension's own origin, so its cookies go
+          // with a plain fetch there. Save to Notion's popup asks Notion's
+          // API so and, given no session, said "Log in" while its tabs were
+          // signed in. Not yet from the worker, whose plain fetches are many
+          // (images, an app on the Mac polled with a short timeout).
+          // Any other fetch goes on untouched, its body unread.
           let credentials;
           try {
             credentials = init && init.credentials !== undefined ? String(init.credentials)
               : (input instanceof Request ? input.credentials : "same-origin");
           } catch (e) { return original.apply(self, args); }
-          if (credentials !== "include") return original.apply(self, args);
+          if (credentials !== "include" && (worker || credentials !== "same-origin")) return original.apply(self, args);
           // A copy to read, so the page's own Request keeps its body for
           // WebKit's fetch if the browser passes.
           let request, url;
@@ -2638,6 +2648,19 @@ enum ExtensionShims {
           else tell(-1);
           return setPopup(details, callback);
         });
+        // Opened by Search, from the page the button has at the call. Left
+        // to WebKit, the promise settles before the browser is asked to show
+        // anything, and an extension that unsets its popup straight after —
+        // Inoreader sets it, opens it, then sets it back to none — has left
+        // nothing to open by then.
+        if (typeof a.openPopup === "function") {
+          put(a, "openPopup", (options, callback) => {
+            if (typeof options === "function") callback = options;
+            const promise = native("action.open", []);
+            if (!callback) return promise;
+            promise.then(() => callback(), (error) => withLastError(error, callback));
+          });
+        }
       }
       fill("action", {
         getUserSettings: resolve({ isOnToolbar: true }), onUserSettingsChanged: event(),
@@ -3331,13 +3354,17 @@ enum ExtensionShims {
       // What an extension registers for a page's own world has Search's
       // passkey patch before it, as its manifest's do (see prepare): a
       // password manager keeps a reference to navigator.credentials as it
-      // finds it, and falls back to that. An update that names no world gets
-      // it too; in any other world the patch does nothing.
+      // finds it, and falls back to that. Isolated registrations need the
+      // same compatibility shim as manifest content scripts, before they
+      // capture fetch or runtime methods. An update that names no world gets
+      // the passkey patch too. The page's own world gets only that patch.
       if (scripting) {
         const first = (scripts, updating) => Array.isArray(scripts) ? scripts.map((s) => {
-          if (!s || !Array.isArray(s.js) || s.js.includes("search-passkeys.js")) return s;
+          if (!s || !Array.isArray(s.js)) return s;
           const world = String(s.world || "").toUpperCase();
-          return world === "MAIN" || (updating && !world) ? { ...s, js: ["search-passkeys.js", ...s.js] } : s;
+          const before = world === "MAIN" ? ["search-passkeys.js"]
+            : updating && !world ? ["search-passkeys.js", "search-shim.js"] : ["search-shim.js"];
+          return { ...s, js: [...before.filter((file) => !s.js.includes(file)), ...s.js] };
         }) : scripts;
         for (const name of ["registerContentScripts", "updateContentScripts"]) {
           const original = scripting[name];
@@ -4788,6 +4815,10 @@ enum ExtensionShims {
                 popups[id, default: [:]]["*"] = path
                 popups[id] = popups[id]?.filter { $0.key == "*" }
             }
+            return nil
+
+        case "action.open":
+            guard owner.openPopup(for: context) else { throw Unsupported(what: "Failed to open popup.") }
             return nil
 
         // MARK: script injection and user scripts

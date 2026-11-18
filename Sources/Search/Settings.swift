@@ -20,6 +20,7 @@ struct SettingsPanel: View {
 
     @ObservedObject private var updater = Updater.shared
     @ObservedObject private var shield = Shield.shared
+    @ObservedObject private var sync = Sync.shared
     /// The keys rows name, as Settings › Shortcuts has them now.
     @ObservedObject private var shortcuts = ShortcutStore.shared
     @State private var isDefault = Links.isDefault
@@ -430,6 +431,7 @@ struct SettingsPanel: View {
             return isDefault ? "Search is the default browser on this Mac" : item.detail
         case "downloads.folder":
             return prefs.downloads.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        case "sync": return sync.on ? sync.summary : item.detail
         case "search.engine": return searchDetail
         case "search.shift": return shiftDetail
         case "search.suggest": return suggestDetail
@@ -487,6 +489,9 @@ struct SettingsPanel: View {
             // Coming from another browser, now or any time later: the same
             // page as File › Bring Things Over… and the Welcome's.
             Pill("Bring Things Over…") { browser.lead(to: InternalPage(.importing)) }
+        case "sync":
+            // On asks for the folder first; cancelled, it stays off.
+            Switch(on: Binding(get: { sync.on }, set: { $0 ? sync.choose() : sync.turnOff() }))
         case "quit.confirm": Switch(on: $prefs.confirmsQuit)
         case "downloads.folder": Pill("Change…") { chooseFolder() }
         case "downloads.ask": Switch(on: $prefs.asksWhereToSave)
@@ -510,6 +515,8 @@ struct SettingsPanel: View {
                 (look, look == .system ? "Auto" : look.title, AnyView(LookPicture(look: look)))
             }, selection: $prefs.look)
         case "pages.dusk": Switch(on: $prefs.darkensPages)
+        case "inspector.chrome": Switch(on: $prefs.inspectorChrome)
+        case "inspector.dark": Switch(on: $prefs.inspectorDark)
         case "tabs.layout":
             Pictures(options: TabsLayout.allCases.map { ($0, $0.title, AnyView(LayoutPicture(layout: $0))) },
                      selection: Binding(
@@ -525,6 +532,7 @@ struct SettingsPanel: View {
                         get: { prefs.cards },
                         set: { on in withAnimation(Motion.glide) { prefs.cards = on } }
                      ))
+        case "layout.cardsFullScreen": Switch(on: $prefs.cardsInFullScreen)
         case "toolbar.left": Switch(on: $prefs.navigationLeft)
         case "tabs.compact":
             Switch(on: Binding(
@@ -562,7 +570,9 @@ struct SettingsPanel: View {
             .fixedSize()
         case "tabs.newAfterLast": Switch(on: $prefs.newTabAfterLast)
         case "tabs.closeGoesBack": Switch(on: $prefs.closeGoesBack)
+        case "tabs.undoReopens": Switch(on: $prefs.undoReopensTab)
         case "tabs.switcherBehindFirst": Switch(on: $prefs.switcherBehindFirst)
+        case "tabs.switcherLeavesOutPins": Switch(on: $prefs.switcherLeavesOutPins)
         case "tabs.frontBeside": Switch(on: $prefs.frontLinksBeside)
         case "tabs.lazy": Switch(on: $prefs.lazyTabs)
         case "tabs.popupWindows": Switch(on: $prefs.popupWindows)
@@ -648,6 +658,8 @@ struct SettingsPanel: View {
             // The number itself takes it back to 100%.
             Steps(stops: Preferences.zooms, value: $prefs.pageZoom, home: 1) { "\(Int(($0 * 100).rounded()))%" }
         case "pages.120": Segmented(options: FastPages.allCases.map { ($0, $0.title) }, selection: $prefs.fastPages)
+        case "pages.capture": Switch(on: $prefs.capturesPages)
+        case "sites.styles": SiteStylesControl(prefs: prefs)
         case "autocorrect": Switch(on: $prefs.autocorrect)
         case "note.panel", "note.translate", "note.sitesearch", "note.links", "note.flick": Always()
         default: EmptyView()
@@ -680,6 +692,8 @@ struct SettingsPanel: View {
         case "spaces.links": Switch(on: $prefs.sendsLinksToSpaces)
         case "pins.keep": Switch(on: $prefs.pinsKeepSite)
         case "pins.list": Switch(on: $prefs.listsPins)
+        case "pins.folders": Switch(on: $prefs.pinFolders)
+        case "pins.commandNewTab": Switch(on: $prefs.pinCommandOpensTab)
         case "newtab.floating": Switch(on: $prefs.floatingNewTab)
         case "newtab.recent": Switch(on: $prefs.recentInNewTab)
         case "commandbar": Switch(on: $prefs.commandBar)
@@ -739,8 +753,11 @@ struct SettingsPanel: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
+        case "links.peek.stays": Switch(on: $prefs.peekStays)
         case "autoscroll": Switch(on: $prefs.autoScroll)
         case "swipe.history": Switch(on: $prefs.holdsHistory)
+        case "launcher.on": Switch(on: $prefs.launcher)
+        case "launcher.key": LauncherKeyBox(prefs: prefs)
         case "note.switcher": Always()
         case "updates.version": versionControl
         case "updates.auto": Switch(on: $prefs.installsUpdates)

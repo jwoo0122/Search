@@ -215,10 +215,22 @@ struct SearchApp: App {
                         .disabled(!(browser.active?.isWeb ?? false))
                 }
                 Divider()
+                // Only once it is on (Settings › Browsing › Pages).
+                if browser.prefs.capturesPages {
+                    Button("Capture…") { browser.toggleSnap() }
+                        .shortcut("view.capture")
+                        .disabled(!(browser.active?.isWeb ?? false))
+                }
                 Button("Hide Elements…") { browser.toggleHiding() }
                     .shortcut("view.hide")
                 Button("Hidden on This Site…") { browser.reviewing.toggle() }
                     .shortcut("view.hidden")
+                // Only once it is on (Settings › Browsing › Pages).
+                if browser.prefs.sitesStyles {
+                    Button("Edit Site Style…") { browser.editSiteStyle() }
+                        .shortcut("view.style")
+                        .disabled(!(browser.active?.isWeb ?? false) || browser.active?.shy == true)
+                }
                 Divider()
                 Button("Zoom In") { browser.zoom(by: 1.1) }
                     .shortcut("view.zoomIn")
@@ -253,11 +265,17 @@ struct SearchApp: App {
                 if browser.prefs.splitView {
                     // The same key puts a pair apart: on a pair, the item
                     // says so, and the one below it without a key goes.
-                    Button(browser.activeSplit == nil || browser.pickedPair != nil ? "Split Current Page" : "Separate Split Tabs") {
+                    Button(browser.activeSplit == nil || browser.pickedSplit != nil ? "Split Current Page" : "Separate Split Tabs") {
                         browser.splitKey()
                     }
                         .shortcut("tabs.split")
                         .disabled(browser.active == nil || browser.active?.bench == true)
+                    // On a split with room: one more page, empty, beside
+                    // the one with the keys (up to four).
+                    if browser.activeSplit != nil {
+                        Button("Add Page to Split View") { browser.addPaneToSplit() }
+                            .disabled(!browser.canAddPane)
+                    }
                     Button("Focus Left Page") { browser.focusPane(onLeft: true) }
                         .shortcut("tabs.focusLeftPane")
                         .disabled(browser.activeSplit == nil)
@@ -267,14 +285,14 @@ struct SearchApp: App {
                     Button("Swap Pages") { browser.swapSplit() }
                         .shortcut("tabs.swapSplit")
                         .disabled(browser.activeSplit == nil)
-                    if browser.activeSplit == nil || browser.pickedPair != nil {
+                    if browser.activeSplit == nil || browser.pickedSplit != nil {
                         Button("Separate Split Tabs") {
                             if let tab = browser.active { browser.detachSplit(tab) }
                         }
                         .shortcut("tabs.separateSplit")
                         .disabled(browser.activeSplit == nil)
                     }
-                    Button("Close Both Pages") { browser.closeSplit() }
+                    Button((browser.activeSplit?.tabs.count ?? 2) > 2 ? "Close All Pages" : "Close Both Pages") { browser.closeSplit() }
                         .disabled(browser.activeSplit == nil)
                     Divider()
                 }
@@ -282,9 +300,11 @@ struct SearchApp: App {
                     let rows = browser.prefs.showsPinRows
                     if tab.pin == nil {
                         Button("Pin Tab") { browser.pin(tab) }
+                            .shortcut("tabs.pin")
                             .disabled(!tab.isWeb || tab.shy)
                         if rows {
                             Button("Pin Tab as Row") { browser.pin(tab, listed: true) }
+                                .shortcut("tabs.pinRow")
                                 .disabled(!tab.isWeb || tab.shy)
                         }
                     } else {
@@ -295,6 +315,7 @@ struct SearchApp: App {
                             Button("Change Letter") { browser.editLetter(tab) }
                         }
                         Button("Unpin Tab") { browser.unpin(tab) }
+                            .shortcut(rows && tab.listed ? "tabs.pinRow" : "tabs.pin")
                     }
                 }
                 Button("Rename Tab") { if let tab = browser.active { browser.beginTabRename(tab) } }
@@ -358,6 +379,11 @@ struct SearchApp: App {
                     .shortcut("history.show")
                 Button("Downloads…") { browser.showDownloads() }
                     .shortcut("history.downloads")
+                // Only while tabs close by themselves (Closing.swift).
+                if browser.prefs.tabLife != .never {
+                    Button("Archived Tabs…") { browser.archiving = true }
+                        .shortcut("history.archive")
+                }
                 Divider()
                 Button("Clear Browsing Data…") { browser.clearBrowsingData() }
                     .shortcut("history.clearData")
@@ -485,6 +511,10 @@ struct ContentView: View {
             // With the tabs down the side, the ground the page's card and the
             // column sit on (see CardEdge).
             (fullscreenTab != nil ? Color.black : cards ? Palette.frame : Palette.ground)
+            // As cards, the column, the bookmarks bar and the gaps around the
+            // page share that ground, so the space's colour washes all of it
+            // alike. Edge to edge the column and the strip bring their own.
+            if cards { SpaceWash(colour: browser.washColour) }
 
             // One stage, always. It starts beside the column and under the
             // strip, not behind them — a page sliding beneath floating chrome
@@ -771,6 +801,21 @@ struct ContentView: View {
             .ignoresSafeArea()
             .transition(.opacity)
         }
+        if let host = browser.styling {
+            // The same: the page stays in view, wearing what you type.
+            ZStack(alignment: .topTrailing) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { browser.styling = nil }
+                StylePanel(browser: browser, host: host)
+                    .id(host)
+                    .padding(.top, Metrics.strip + 8)
+                    .padding(.trailing, 14)
+                    .transition(.scale(scale: 0.97, anchor: .topTrailing).combined(with: .opacity))
+            }
+            .ignoresSafeArea()
+            .transition(.opacity)
+        }
     }
 
     /// The ⌃Tab switcher, small windows' moons included. Its own property:
@@ -900,6 +945,7 @@ struct ContentView: View {
             .animation(Motion.settle, value: browser.welcoming)
             .animation(Motion.settle, value: browser.newsShowing)
             .animation(Motion.settle, value: browser.reviewing)
+            .animation(Motion.settle, value: browser.styling)
         .onAppear {
             watchKeys()
             browser.askFocus()
@@ -1030,11 +1076,8 @@ struct ContentView: View {
     @ViewBuilder
     private var fullscreenWatch: some View {
         if browser.prefs.splitView, let split = browser.activeSplit {
-            if let left = browser.tabs.first(where: { $0.id == split.left }) {
-                TabImmersionWatch(tab: left) { immersing() }.id(left.id)
-            }
-            if let right = browser.tabs.first(where: { $0.id == split.right }) {
-                TabImmersionWatch(tab: right) { immersing() }.id(right.id)
+            ForEach(browser.tabs.filter { split.contains($0.id) }) { pane in
+                TabImmersionWatch(tab: pane) { immersing() }.id(pane.id)
             }
         } else if let active = browser.active {
             TabImmersionWatch(tab: active) { immersing() }.id(active.id)
@@ -1171,12 +1214,17 @@ struct ContentView: View {
     private func watchKeys() {
         let id = ObjectIdentifier(browser)
         if let old = ContentView.monitors[id] { NSEvent.removeMonitor(old) }
-        ContentView.monitors[id] = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown]) { event in
-            // A click on the tab switcher, in this window only (see
-            // Browser.clickTabSwitcher), turned into the top-left coordinates
-            // SwiftUI's frames are in.
-            if event.type == .leftMouseDown {
-                guard let window, event.window === window, let height = window.contentView?.bounds.height
+        ContentView.monitors[id] = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { event in
+            if event.type != .keyDown, event.type != .flagsChanged {
+                // A click in this window means a close is no longer the last
+                // thing done (Browser.lastClose). On the way down, so the
+                // close a click on a tab's cross makes, on the way up, is.
+                guard let window, event.window === window else { return event }
+                Browser.lastClose = nil
+                // A click on the tab switcher, in this window only (see
+                // Browser.clickTabSwitcher), turned into the top-left
+                // coordinates SwiftUI's frames are in.
+                guard event.type == .leftMouseDown, let height = window.contentView?.bounds.height
                 else { return event }
                 let at = event.locationInWindow
                 return browser.clickTabSwitcher(at: CGPoint(x: at.x, y: height - at.y)) ? nil : event
@@ -1185,6 +1233,11 @@ struct ContentView: View {
             // each takes only its own window's, and the one in front takes
             // those of windows that aren't a browser's (a panel, the little
             // window).
+            // The address field raised from another app answers its own keys
+            // (Launcher.swift): taken here, Escape would put away what is up
+            // in the window behind it, ⌘W close a tab there, and a key typed
+            // while this window's field is on its way be held for it.
+            if Launcher.owns(event.window) { return event }
             guard mine(event) else { return event }
             guard event.type == .keyDown else {
                 let held = browser.prefs.showsTabShortcuts && event.modifierFlags.contains(.command)
@@ -1198,6 +1251,7 @@ struct ContentView: View {
                 if !event.modifierFlags.contains(.command) { browser.landSummon() }
                 return event
             }
+            ContentView.keyed(event)
             // Escape on a page filling the screen is WebKit's, which leaves
             // on the first one, as Safari does. Its window isn't a browser's,
             // so the key came here first and put away what was left up in
@@ -1242,7 +1296,18 @@ struct ContentView: View {
             }
             return take(event) ? nil : event
         }
-        ContentView.keyHooks[id] = { event in take(event) ? nil : event }
+        ContentView.keyHooks[id] = { event in
+            ContentView.keyed(event)
+            return take(event) ? nil : event
+        }
+    }
+
+    /// Any key but ⌘Z itself means a close is no longer the last thing
+    /// done, and ⌘Z no longer undoes it (Browser.lastClose). Before anything
+    /// acts on the key: ⌘W's own close is then the last.
+    private static func keyed(_ event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if flags != .command || event.shortcutCharacters != "z" { Browser.lastClose = nil }
     }
 
     /// Each browser's key monitor. Kept here rather than in the view, so
@@ -1379,9 +1444,9 @@ struct ContentView: View {
         // Settings, History and the rest are tabs, and ⌃Tab goes to and
         // from them like any other.
         return !browser.welcoming &&
-            !browser.reviewing && !browser.bookmarksOpen &&
+            !browser.reviewing && browser.styling == nil && !browser.bookmarksOpen &&
             !browser.veiling && !browser.summoning && !browser.makingSpace &&
-            browser.peekTab == nil && browser.editingTab == nil &&
+            !browser.peekInFront && browser.editingTab == nil &&
             browser.asking == nil && browser.offering == nil && browser.suggesting == nil
     }
 
@@ -1397,6 +1462,8 @@ struct ContentView: View {
         if event.window?.sheetParent != nil || NSApp.modalWindow != nil { return false }
         // A small window's keys are its own (see Little.swift).
         if let little = LittleWindow.owning(event.window) { return little.take(event) }
+        // Nor the address field raised from another app's (Launcher.swift).
+        if Launcher.owns(event.window) { return false }
         // A popup window: ⌘W closes it, not a tab of the
         // window menus act on. New tabs return to its browser; Escape
         // dismisses its permission question.
@@ -1456,7 +1523,7 @@ struct ContentView: View {
                 browser.cancelTabEdit()
                 return true
             }
-            if browser.peekTab != nil {
+            if browser.peekInFront {
                 browser.closePeek()
                 return true
             }
@@ -1479,8 +1546,16 @@ struct ContentView: View {
                 browser.toggleHiding()
                 return true
             }
+            if browser.snapping {
+                browser.stopSnapping()
+                return true
+            }
             if browser.reviewing {
                 browser.reviewing = false
+                return true
+            }
+            if browser.styling != nil {
+                browser.styling = nil
                 return true
             }
             if browser.finding {
@@ -1540,7 +1615,7 @@ struct ContentView: View {
         if event.keyCode == 36 || event.keyCode == 76,
            flags.intersection([.command, .shift, .option, .control]) == .command
             || (browser.prefs.splitView && flags.intersection([.command, .shift, .option, .control]) == [.command, .option]),
-           let peek = browser.peekTab, !peek.typing, peek.built?.inputContext == nil {
+           browser.peekInFront, let peek = browser.peekTab, !peek.typing, peek.built?.inputContext == nil {
             browser.keepPeek(beside: flags.contains(.option))
             return true
         }
@@ -1599,6 +1674,9 @@ struct ContentView: View {
                 if Command.split.contains(command.id), !browser.prefs.splitView { return false }
                 if Command.ai.contains(command.id), !browser.prefs.ai { return false }
                 if Command.dusk.contains(command.id), !browser.prefs.darkensPages { return false }
+                if Command.archive.contains(command.id), browser.prefs.tabLife == .never { return false }
+                if Command.capture.contains(command.id), !browser.prefs.capturesPages { return false }
+                if Command.styles.contains(command.id), !browser.prefs.sitesStyles { return false }
                 // An arrow the text system uses moves the caret, whichever
                 // command wears it — Back on ⌘←, or anything else on ⌘↑ or
                 // ⌥→. The menu wears the same key, so it is taken off for
@@ -1752,9 +1830,22 @@ struct ContentView: View {
         case "u" where shifted:
             browser.reviewing.toggle()
         case "z" where !shifted:
-            // Only while pointing. Everywhere else undo belongs to the page.
-            guard browser.veiling else { return false }
-            browser.undoHiding()
+            // While pointing, the last thing hidden comes back.
+            if browser.veiling {
+                browser.undoHiding()
+                return true
+            }
+            // With Settings › Tabs › ⌘Z reopens a closed tab on, the tab
+            // just closed, as ⇧⌘T would bring it back, while closing it is
+            // still the last thing done (Browser.lastClose): anything typed
+            // or clicked since, and ⌘Z is the page's as before. A caret in a
+            // text box the tab landed on doesn't keep it: nothing has been
+            // typed there to undo. Only once the page has left the key
+            // unused (pageFirst): a document or a drawing keeps its own
+            // undo. Not in a panel or another window.
+            guard browser.prefs.undoReopensTab, let window, event.window === window,
+                  browser.canUndoClose else { return false }
+            browser.undoClose()
         // ⌘+ arrives as "=" or "+" depending on the keyboard; both mean bigger.
         case "=", "+":
             browser.zoom(by: 1.1)

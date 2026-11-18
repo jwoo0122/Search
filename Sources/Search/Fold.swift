@@ -83,15 +83,15 @@ extension Browser {
     /// hears nothing of the pointer there (see PageView.underCover).
     func covers(_ page: NSView, at point: NSPoint) -> Bool {
         guard let window, page.window === window else { return false }
-        if let peek = peekTab, peek.built !== page { return true }
+        if peekInFront, let peek = peekTab, peek.built !== page { return true }
         // The address field raised over the page in front, by ⌘L or by ⌘T's
         // floating field, dims all of that page and only that page: with
         // Split View on, the other pane is still there to point at.
         if editing, let active, !active.isBlank, active.built === page { return true }
         // What comes over the whole window: the ⌃Tab switcher, the hidden
-        // elements' list (a click beside it puts it away), Welcome and
-        // What's New.
-        if tabSwitcher.visible || reviewing || welcoming || newsShowing { return true }
+        // elements' list and a site's style (a click beside either puts it
+        // away), Welcome and What's New.
+        if tabSwitcher.visible || reviewing || styling != nil || welcoming || newsShowing { return true }
         // The Find bar is a pill over one corner of the page: whatever a
         // click there would land on decides. Asking the window costs far more
         // than the flags above, so only while the bar is open.

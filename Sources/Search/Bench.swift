@@ -827,6 +827,39 @@ final class Bench {
             let width = request["width"] as? Double
             shoot(tab, to: URL(fileURLWithPath: path), width: width, answer)
 
+        case "snap":
+            // Capture… (Snap.swift). start, stop and state work the layer as
+            // the menu does; area X Y W H, element X Y and page choose as a
+            // drag, a click or Whole Page would, the picture going to `path`
+            // and to a pasteboard of the bench's own, never the Mac's.
+            guard Store.testing else { answer(["error": "snap only works on a --test run"]); return }
+            guard let tab = find(request, in: browser) else { answer(missing(request)); return }
+            let mode = request["mode"] as? String ?? "state"
+            func number(_ key: String) -> Double { (request[key] as? NSNumber)?.doubleValue ?? 0 }
+            switch mode {
+            case "start", "stop", "state":
+                if mode == "start", !browser.snapping { browser.toggleSnap() }
+                if mode == "stop" { browser.stopSnapping() }
+                tab.web.evaluateInSearch("!!(window.__officeCapture && window.__officeCapture.live())") { live in
+                    answer(["snapping": browser.snapping, "live": (live as? Bool) ?? false,
+                            "on": browser.prefs.capturesPages])
+                }
+            case "area", "element", "page":
+                house(tab)
+                let path = (request["path"] as? String)
+                    ?? NSTemporaryDirectory() + "search-bench-snap-\(Bench.short(tab)).png"
+                let choose = mode == "area" ? "window.__officeCapture.area(x, y, w, h);"
+                    : mode == "element" ? "window.__officeCapture.element(x, y);" : "window.__officeCapture.page();"
+                tab.web.callInSearch(SnapGeometry.script + "\nreturn await new Promise(function (answer) { window.__officeCapture.on(answer); \(choose) });",
+                                     arguments: ["x": number("x"), "y": number("y"), "w": number("w"), "h": number("h")]) { value in
+                    guard let choice = SnapGeometry.Choice(value) else { answer(["error": "nothing chosen"]); return }
+                    browser.snap(choice, in: tab, to: URL(fileURLWithPath: path),
+                                 board: NSPasteboard(name: NSPasteboard.Name("search.bench.snap")), finished: answer)
+                }
+            default:
+                answer(["error": "snap start|stop|state|area|element|page"])
+            }
+
         case "probe":
             // The state of the window itself, for the bug that is not in a
             // page: which panels are up, whether something modal has the
@@ -841,6 +874,10 @@ final class Bench {
                 "sheetReturn": browser.window?.attachedSheet?.defaultButtonCell?.title ?? "",
                 "history": browser.recalling,
                 "downloads": browser.hoarding,
+                // History › Archived Tabs…: up or not, and what it holds
+                // for this window's profile, newest first.
+                "archive": browser.archiving,
+                "archived": browser.archive.tabs.map { ["url": $0.url.absoluteString, "title": $0.title] },
                 "bookmarks": browser.bookmarking,
                 // The dropdown off the button, the ⇧⌘B card in it, and how
                 // many are kept, for every window alike.
@@ -915,6 +952,8 @@ final class Bench {
             // The column folded away, out for a look, and the lights with it (see Fold.swift).
             out["peek"] = hidden(browser.peekTab) ? "" : browser.peekTab?.address?.absoluteString ?? ""
             out["peekFrom"] = browser.peekFrom?.uuidString ?? ""
+            // Over the page now, or hidden while its tab is not (see peekInFront).
+            out["peekShown"] = browser.peekInFront
             // The size the peek's page is drawn at (see Tab.applyRememberedZoom).
             out["peekZoom"] = Double(browser.peekTab?.built?.pageZoom ?? 0)
             out["fetching"] = ["showing": browser.fetches.showing, "fraction": browser.fetches.fraction ?? -1, "done": browser.fetches.done]
@@ -2399,6 +2438,28 @@ final class Bench {
                 answer(["peek": ""])
                 return
             }
+            // "pinch": two fingers spreading on the peek, a list of steps
+            // ending as the fingers lift (see PageView.peekPinch).
+            if let steps = request["pinch"] as? [Double] {
+                guard let page = browser.peekTab?.built as? PageView else { answer(["error": "no peek"]); return }
+                page.peekPinch(.began, by: 0)
+                for step in steps { page.peekPinch(.changed, by: CGFloat(step)) }
+                let pinch = browser.peekPinch
+                page.peekPinch(request["cancel"] as? Bool == true ? .cancelled : .ended, by: 0)
+                answer(["pinch": Double(pinch), "peek": browser.peekTab?.address?.absoluteString ?? ""])
+                return
+            }
+            // "js": run in the peek's page, in front or hidden.
+            if let js = request["js"] as? String {
+                guard let page = browser.peekTab?.built else { answer(["error": "no peek"]); return }
+                page.evaluateJavaScript(js) { value, error in
+                    MainActor.assumeIsolated {
+                        if let error { answer(["error": error.localizedDescription]); return }
+                        answer(["value": Bench.plain(value)])
+                    }
+                }
+                return
+            }
             guard let tab = browser.active, let text = request["url"] as? String, let url = URL(string: text)
             else { answer(["error": "peek needs a tab in front and an address"]); return }
             browser.peek(url, from: tab)
@@ -3438,6 +3499,46 @@ final class Bench {
                 "active": browser.active.flatMap { Store.testing || !$0.shy ? $0.address?.host() : nil } ?? "",
             ])
 
+        case "launcher":
+            // The address field from any app (Launcher.swift), in its model
+            // alone: on a run the bench drives the key is never asked of
+            // macOS and the panel never shown. "fire" is the key pressed.
+            guard Store.testing else { answer(["error": "launcher only works on a --test run"]); return }
+            let launcher = Launcher.shared
+            let prefs = Shared.prefs
+            switch request["action"] as? String ?? "state" {
+            case "on": prefs.launcher = request["on"] as? Bool ?? true
+            // ⇧⌘Space, as Settings offers it, or "none".
+            case "key": prefs.launcherKey = (request["key"] as? String) == "none" ? nil : .suggested
+            case "fire": launcher.toggle()
+            case "type": launcher.type(request["text"] as? String ?? "")
+            case "pick": launcher.picked = request["index"] as? Int
+            case "submit": launcher.submit()
+            case "escape": launcher.dismiss()
+            case "state": break
+            default:
+                answer(["error": "launcher takes on, key, fire, type, pick, submit, escape or state"])
+                return
+            }
+            // A turn later, once the switch's and the key's sinks have run.
+            DispatchQueue.main.async {
+                let front = Browsers.front ?? browser
+                answer([
+                    "on": prefs.launcher,
+                    "key": prefs.launcherKey?.combo.display ?? "",
+                    "wants": launcher.wants,
+                    "registered": HotKey.isSet,
+                    "up": launcher.up,
+                    "typed": launcher.typed,
+                    "offers": launcher.offers.map { ["url": $0.url.absoluteString, "open": $0.tab != nil, "kind": "\($0.kind)"] },
+                    // The window's own field, which the launcher's never shows in.
+                    "editing": front.editing,
+                    "windows": Browsers.all.filter { $0.isOpen && !$0.isPopup }.count,
+                    "tabs": front.tabs.map { ["id": Bench.short($0), "address": $0.address?.absoluteString ?? "", "private": $0.shy] },
+                    "active": front.active.map { Bench.short($0) } ?? "",
+                ])
+            }
+
         case "site":
             // The site card for the tab on screen, or one step in on its
             // connection, drawn off screen (see SiteCard.swift).
@@ -3462,6 +3563,139 @@ final class Bench {
                 } catch { answer(["error": error.localizedDescription]) }
                 window.contentView = nil
             }
+
+        case "pinfolder":
+            // Folders in pinned rows (PinFolders.swift), as the setting,
+            // the menus and a drag make and change them, and the rows read
+            // back as drawn. Test runs only: it rearranges your pins.
+            guard Store.testing else { answer(["error": "pinfolder only works on a --test run"]); return }
+            let folders = browser.pinFolders
+            func named(_ key: String) -> PinFolder? {
+                guard let name = request[key] as? String, !name.isEmpty else { return nil }
+                return folders.first { $0.name == name } ?? folders.first { $0.id.uuidString.lowercased().hasPrefix(name.lowercased()) }
+            }
+            func pinned(_ key: String) -> Tab? {
+                guard let ref = (request[key] as? String)?.lowercased(), !ref.isEmpty else { return nil }
+                return browser.tabs.first { $0.id.uuidString.lowercased().hasPrefix(ref) }
+            }
+            func state(_ extra: [String: Any] = [:]) -> [String: Any] {
+                let now = browser.pinFolders
+                let name = { (id: UUID?) -> Any in id.flatMap { id in now.first { $0.id == id }?.name } ?? NSNull() }
+                var out: [String: Any] = [
+                    "setting": browser.prefs.pinFolders, "rows": browser.prefs.showsPinRows,
+                    "drawsFolders": browser.showsPinFolderRows,
+                    "folders": now.map { ["id": $0.id.uuidString, "name": $0.name, "parent": name($0.parent),
+                                          "collapsed": $0.collapsed, "depth": PinTree.depth(of: $0.id, in: now),
+                                          "feed": $0.feed?.absoluteString ?? NSNull(),
+                                          "items": ($0.items ?? []).map { [$0.title, $0.link.absoluteString] },
+                                          "failed": LiveFolders.failed.contains($0.id)] as [String: Any] },
+                    // kind, depth, title, folded: what the column draws.
+                    "lines": browser.pinRowLines().map(\.described),
+                    // The rows in the order the row (and pins.json) keeps them.
+                    "order": browser.listedPins.map { [Bench.short($0), $0.name ?? $0.title, name($0.pinFolder)] },
+                    "saved": Pins.defs(browser.spaceID).filter { $0.listed == true }.map { [$0.title, name($0.folder)] },
+                ]
+                for (key, value) in extra { out[key] = value }
+                return out
+            }
+            switch request["action"] as? String ?? "state" {
+            case "state":
+                break
+            case "on":
+                // Pinned rows with it, which it means nothing without.
+                browser.prefs.listsPins = true
+                browser.prefs.pinFolders = true
+                browser.pinsChanged(in: browser.spaceID)
+            case "off":
+                browser.prefs.pinFolders = false
+            case "pin":
+                // A tab pinned as a row, ready for a folder.
+                guard let tab = pinned("id") else { answer(missing(request)); return }
+                if tab.pin == nil { browser.pin(tab, listed: true) } else if !tab.listed { browser.setListed(tab, true) }
+            case "new":
+                // New Folder, holding a pin (its menu's) or inside a folder
+                // (a folder's menu's New Folder Inside).
+                let tab = pinned("id")
+                if request["id"] != nil, tab == nil { answer(missing(request)); return }
+                guard let made = browser.newPinFolder(named: request["name"] as? String ?? "New Folder",
+                                                      in: named("in")?.id, holding: tab, rename: false)
+                else { answer(["error": "no folder can be made there"]); return }
+                answer(state(["made": made.uuidString])); return
+            case "move":
+                // Move to Folder, or with "anchor" where a drag lets it go.
+                guard let tab = pinned("id") else { answer(missing(request)); return }
+                let into: UUID?
+                if request["folder"] as? String == "none" { into = nil }
+                else if let folder = named("folder") { into = folder.id }
+                else { answer(["error": "no folder “\(request["folder"] as? String ?? "")”"]); return }
+                guard browser.takesFolder(tab) else { answer(["error": "only a pinned row of this space goes in a folder"]); return }
+                browser.movePin(tab, into: into, anchor: pinned("anchor")?.id, after: request["after"] as? Bool ?? false)
+            case "fold", "open":
+                guard let folder = named("name") else { answer(["error": "no folder “\(request["name"] as? String ?? "")”"]); return }
+                browser.setPinFolderFolded(folder.id, request["action"] as? String == "fold")
+            case "rename":
+                guard let folder = named("name"), let to = request["to"] as? String else { answer(["error": "rename needs NAME TO"]); return }
+                browser.renamePinFolder(folder.id, to: to)
+            case "nest":
+                guard let folder = named("name") else { answer(["error": "no folder “\(request["name"] as? String ?? "")”"]); return }
+                let parent = request["parent"] as? String == "none" ? nil : named("parent")?.id
+                guard request["parent"] as? String == "none" || parent != nil else { answer(["error": "no parent folder"]); return }
+                guard PinTree.canMove(folder.id, into: parent, in: folders) else { answer(["error": "too deep, or inside itself"]); return }
+                browser.movePinFolder(folder.id, into: parent)
+            case "delete":
+                guard let folder = named("name") else { answer(["error": "no folder “\(request["name"] as? String ?? "")”"]); return }
+                browser.deletePinFolder(folder.id)
+            case "live":
+                // New Live Folder… with its address typed (LiveFolders.swift):
+                // fetched, and the folder made from what it said.
+                guard let url = Feed.address(request["url"] as? String ?? "") else { answer(["error": "live needs a url"]); return }
+                let parent = named("in")?.id
+                Task { @MainActor in
+                    switch await Feed.load(url) {
+                    case .success(let read): answer(state(["made": browser.newLiveFolder(read, in: parent).uuidString]))
+                    case .failure(let problem): answer(state(["error": problem.said(url)]))
+                    }
+                }
+                return
+            case "refresh":
+                // Refresh in a live folder's menu; answered once it is back.
+                guard let folder = named("name"), folder.isLive else { answer(["error": "no live folder “\(request["name"] as? String ?? "")”"]); return }
+                LiveFolders.refresh(folder.id, in: browser.spaceID)
+                func wait(_ left: Int) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        if LiveFolders.isFetching(folder.id) && left > 0 { wait(left - 1) } else { answer(state()) }
+                    }
+                }
+                wait(150)
+                return
+            case "openitem":
+                // A live folder's post clicked: its page in a new tab.
+                guard let folder = named("name"), let title = request["title"] as? String,
+                      let item = folder.items?.first(where: { $0.title == title })
+                else { answer(["error": "no post “\(request["title"] as? String ?? "")” in that folder"]); return }
+                browser.openFeedItem(item)
+                answer(state(["opened": item.link.absoluteString, "front": browser.active.map { ["pinned": $0.pin != nil] } ?? NSNull()]))
+                return
+            case "drawn":
+                // The column drawn off screen, as `column` draws it, and the
+                // lines it drew read back: kind, depth, title, folded.
+                let width = Double(browser.prefs.columnWidth)
+                let host = NSHostingView(rootView: SideBar(browser: browser, prefs: browser.prefs).frame(width: width, height: 800))
+                host.frame = NSRect(x: 0, y: 0, width: width, height: 800)
+                let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+                window.contentView = host
+                SideBar.drawnPinLines = []
+                host.layoutSubtreeIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    host.layoutSubtreeIfNeeded()
+                    answer(state(["drawn": SideBar.drawnPinLines]))
+                    window.contentView = nil
+                }
+                return
+            default:
+                answer(["error": "pinfolder: state|on|off|pin|new|move|fold|open|rename|nest|delete|live|refresh|openitem|drawn"]); return
+            }
+            answer(state())
 
         case "column":
             // The column of tabs, drawn off screen at its width, with what the
@@ -3556,6 +3790,9 @@ final class Bench {
                 SpaceSwipe.shared.ended()
             case "move":
                 if let index = request["index"] as? Int { browser.moveSpace(browser.spaceID, to: index - 1) }
+            case "colour":
+                // The space on screen's colour, by index into Spaces.colours.
+                browser.setSpaceColour(browser.spaceID, to: request["colour"] as? Int ?? 0)
             case "menu":
                 // A space chosen from the space's menu, by its title, as a click would.
                 let menu = SpaceMenu.menu(for: browser)
@@ -3578,6 +3815,8 @@ final class Bench {
                 "parked": browser.parked.map { [$0.key.uuidString: $0.value.tabs.count] },
                 "tabs": browser.tabs.count,
                 "making": browser.makingSpace,
+                // The colour the chrome is washed with, by name; "" for none.
+                "wash": browser.washColour.map { Spaces.colourNames[$0] } ?? "",
                 "swipe": Double(browser.spaceSwipe),
                 // Each space off screen as a swipe draws it passing by
                 // (Parked.drawn): its groups, folded or not, and their tabs.
@@ -3627,6 +3866,7 @@ final class Bench {
             if let on = request["welcome"] as? Bool { browser.welcoming = on }
             if let on = request["history"] as? Bool { browser.recalling = on }
             if let on = request["downloads"] as? Bool { browser.hoarding = on }
+            if let on = request["archive"] as? Bool { browser.archiving = on }
             if let on = request["bookmarks"] as? Bool { browser.bookmarking = on }
             // The Bring things over sheet: on, off, on at a browser by name,
             // or on for the extensions alone, as Settings › Extensions opens it.
@@ -3653,6 +3893,7 @@ final class Bench {
             }
             if let mode = (request["pages120"] as? String).flatMap(FastPages.init) { browser.prefs.fastPages = mode }
             if let on = request["dusk"] as? Bool { browser.prefs.darkensPages = on }
+            if let on = request["captures"] as? Bool { browser.prefs.capturesPages = on }
             if let on = request["sidebar"] as? Bool { browser.prefs.sidebar = on }
             // Swipe between pages, standing in for the Mac's own setting.
             if let on = request["swipepages"] as? Bool, Store.testing { Swipe.testing = on }
@@ -3677,6 +3918,9 @@ final class Bench {
             // the window going there: a test run never takes the screen.
             if let on = request["fullscreen"] as? Bool, Store.testing { browser.fullScreen = on }
             if let on = request["peek"] as? Bool { browser.peeking = on }
+            // Settings › Keyboard & Mouse › Peek stays with its tab, moved as
+            // its switch moves it.
+            if let on = request["peekstays"] as? Bool { browser.prefs.peekStays = on }
             // A peek at a link (Peek.swift): its two buttons.
             if let what = request["peeklink"] as? String {
                 if what == "keep" { browser.keepPeek() }
@@ -3820,6 +4064,17 @@ final class Bench {
                 answer(["error": "popups state|open|allow|remove|sites"])
             }
 
+        case "sitestyle":
+            // A site's own style written as the editor writes it (see
+            // SiteStyles.swift), and what the store then holds. Test runs
+            // only: it writes styles.json.
+            guard Store.testing else { answer(["error": "sitestyle only works on a --test run"]); return }
+            guard let host = request["host"] as? String else { answer(["error": "sitestyle needs host"]); return }
+            if let on = request["on"] as? Bool { browser.prefs.sitesStyles = on }
+            if let css = request["css"] as? String { SiteStyles.shared.set(css, on: host) }
+            answer(["on": SiteStyles.shared.on, "css": SiteStyles.shared.css(on: host) ?? "",
+                    "written": SiteStyles.shared.written(on: host), "editing": browser.styling ?? ""])
+
         case "extensions", "ext-add", "ext-crx", "ext-fetches", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "ext-private", "capture", "capture-stop":
             guard #available(macOS 15.4, *) else {
                 answer(["error": "extensions need macOS 15.4"])
@@ -3829,9 +4084,9 @@ final class Bench {
 
         default:
             answer(["error": "unknown command “\(verb)”", "commands": [
-                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "agent", "kept", "eval", "click", "type", "submit", "shot", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile", "settings",
+                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "agent", "kept", "eval", "click", "type", "submit", "shot", "snap", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile", "settings",
 
-                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "player", "agent", "eval", "click", "type", "submit", "shot", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile", "settings",
+                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "player", "agent", "eval", "click", "type", "submit", "shot", "snap", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile", "settings",
             ]])
         }
     }
@@ -4135,7 +4390,7 @@ final class Bench {
             guard let root = browser.window?.contentView?.superview, let found = stage(in: root) else {
                 answer(["error": "no split stage in this window"]); return
             }
-            reply(["motion": found.motionNow])
+            reply(["motion": found.motionNow, "dividers": found.dividerFrames])
         case "pose":
             // A card as a page's question would put up, with no page waiting
             // on it: a page that asks is held by WebKit until it is answered,
@@ -4152,6 +4407,23 @@ final class Bench {
                 answer(["error": "split answer needs the id of a page with a question"]); return
             }
             browser.answer(question, ok: request["ok"] as? Bool ?? true, text: request["text"] as? String)
+            reply()
+        case "add":
+            // Tabs › Add Page to Split View: an empty page beside the one
+            // with the keys, while the split on screen has room.
+            browser.addPaneToSplit()
+            reply()
+        case "leave":
+            // A tab menu's Remove from Split View: this page out, the
+            // others together (of two, both apart).
+            guard let page = tab() else { answer(["error": "split leave needs id"]); return }
+            browser.leaveSplit(page)
+            reply()
+        case "sizes":
+            guard let pair = request["split"] as? String, let id = UUID(uuidString: pair),
+                  let sizes = request["sizes"] as? [Double]
+            else { answer(["error": "split sizes needs split UUID and sizes"]); return }
+            browser.setSplitSizes(id, sizes)
             reply()
         case "swap": browser.swapSplit(); reply()
         case "even": browser.evenSplit(); reply()
@@ -4274,6 +4546,8 @@ final class Bench {
             },
             "held": browser.heldDialogs.mapValues(\.count).reduce(into: [String: Int]()) { out, entry in
                 if let tab = browser.tabs.first(where: { $0.id == entry.key }) { out[Bench.short(tab)] = entry.value }
+                // A peek hidden behind another tab waits too (see Browser.ask).
+                if entry.key == browser.peekTab?.id { out["peek"] = entry.value }
             },
             "paneFrames": browser.tabs.compactMap { tab -> [String: Any]? in
                 guard let web = tab.built, let window = browser.window, web.window === window else { return nil }
@@ -4288,6 +4562,10 @@ final class Bench {
             // in Split View would pair: off while the menu's item is off.
             "selected": browser.tabs.filter { browser.selectedTabIDs.contains($0.id) }.map { Bench.short($0) },
             "pickedPair": browser.pickedPair.map { [Bench.short($0.left), Bench.short($0.right)] } ?? [],
+            // What Open 2–4 Tabs in Split View would put together.
+            "pickedSplit": browser.pickedSplit?.map { Bench.short($0) } ?? [],
+            "canAddPane": browser.canAddPane,
+            "most": TabSplit.most,
             "pickedPaired": browser.pickedTabsArePaired,
         ]
     }

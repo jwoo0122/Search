@@ -203,8 +203,12 @@ struct Command: Identifiable {
         Command("view.duskPause", "Pause Darkening", .view, KeyCombo("d", shift: true, option: true)) { $0.pauseDusk() },
         Command("view.summarize", "Summarize Page", .view, nil) { $0.summarizePage() },
         Command("view.ask", "Ask About This Page…", .view, nil) { $0.askAboutPage() },
+        // No key until you give one: Arc's ⇧⌘2 is a shifted digit, which
+        // the menus read as a different character on many keyboards.
+        Command("view.capture", "Capture…", .view, nil) { $0.toggleSnap() },
         Command("view.hide", "Hide Elements…", .view, KeyCombo("h", shift: true)) { $0.toggleHiding() },
         Command("view.hidden", "Hidden on This Site…", .view, KeyCombo("u", shift: true)) { $0.reviewing.toggle() },
+        Command("view.style", "Edit Site Style…", .view, nil) { $0.editSiteStyle() },
         Command("view.zoomIn", "Zoom In", .view, KeyCombo("+")) { $0.zoom(by: 1.1) },
         Command("view.zoomOut", "Zoom Out", .view, KeyCombo("-")) { $0.zoom(by: 1 / 1.1) },
         Command("view.actualSize", "Actual Size", .view, KeyCombo("0")) { $0.resetZoom() },
@@ -252,6 +256,17 @@ struct Command: Identifiable {
             guard browser.prefs.splitView, let tab = browser.active else { return }
             browser.detachSplit(tab)
         },
+        // No key until you give one: either unpins a pinned tab, as ⌥⌘N
+        // takes away the split it made. With the rows off every pin is a
+        // square, and so is the row's.
+        Command("tabs.pin", "Pin Tab", .tabs, nil) { browser in
+            guard let tab = browser.active else { return }
+            if tab.pin != nil { browser.unpin(tab) } else if tab.isWeb { browser.pin(tab) }
+        },
+        Command("tabs.pinRow", "Pin Tab as Row", .tabs, nil) { browser in
+            guard let tab = browser.active else { return }
+            if tab.pin != nil { browser.unpin(tab) } else if tab.isWeb { browser.pin(tab, listed: browser.prefs.showsPinRows) }
+        },
         Command("tabs.rename", "Rename Tab", .tabs, nil) { browser in
             if let tab = browser.active { browser.beginTabRename(tab) }
         },
@@ -272,6 +287,7 @@ struct Command: Identifiable {
 
         Command("history.show", "Show History…", .history, KeyCombo("y")) { $0.recalling = true },
         Command("history.downloads", "Downloads…", .history, KeyCombo("j", shift: true)) { $0.showDownloads() },
+        Command("history.archive", "Archived Tabs…", .history, nil) { $0.archiving = true },
         Command("history.clearData", "Clear Browsing Data…", .history, KeyCombo("delete", shift: true)) { $0.clearBrowsingData() },
         Command("history.clear", "Clear History", .history, nil) { $0.clearHistory() },
     ] + (1...9).map { number in
@@ -534,4 +550,11 @@ extension Command {
     static let ai: Set<String> = ["view.summarize", "view.ask"]
     /// Dark pages': with them off, not listed, and their keys go on to the page.
     static let dusk: Set<String> = ["view.dusk", "view.duskPause"]
+    /// The archive's: with tabs never closing by themselves, not listed.
+    static let archive: Set<String> = ["history.archive"]
+    /// Capture…: with Capture pages off, not listed, and its key goes on to the page.
+    static let capture: Set<String> = ["view.capture"]
+    /// Edit Site Style…: with Your own style for a site off, not listed,
+    /// and its key goes on to the page.
+    static let styles: Set<String> = ["view.style"]
 }
