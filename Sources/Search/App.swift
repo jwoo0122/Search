@@ -84,6 +84,8 @@ struct SearchApp: App {
                     .shortcut("file.closeTab")
                 Button("Close Window") { browser.closeWindow() }
                     .shortcut("file.closeWindow")
+                // A coding agent connected (AgentControl): Stop, one click away.
+                StopAgentMenuItem()
             }
             CommandGroup(replacing: .printItem) {
                 Button("Share…") { browser.share() }
@@ -498,6 +500,8 @@ struct ContentView: View {
     @State private var immersionRevision = 0
     /// The window's width, for a side panel that leaves the page some room.
     @State private var across: CGFloat = 0
+    /// And its height, for a space's gradient to run across the whole window.
+    @State private var tall: CGFloat = 0
     /// The column's and the side panel's widths while their edges are held.
     @StateObject private var edges = HeldEdges()
 
@@ -514,7 +518,7 @@ struct ContentView: View {
             // As cards, the column, the bookmarks bar and the gaps around the
             // page share that ground, so the space's colour washes all of it
             // alike. Edge to edge the column and the strip bring their own.
-            if cards { SpaceWash(colour: browser.washColour) }
+            if cards { SpaceWash(look: browser.wash) }
 
             // One stage, always. It starts beside the column and under the
             // strip, not behind them — a page sliding beneath floating chrome
@@ -564,12 +568,24 @@ struct ContentView: View {
         }
         .ignoresSafeArea()
         .background { fullscreenWatch }
-        .background { GeometryReader { geo in Color.clear.onAppear { across = geo.size.width }
-            .onChange(of: geo.size.width) { _, width in across = width } } }
+        .background { GeometryReader { geo in Color.clear.onAppear { across = geo.size.width; tall = geo.size.height }
+            .onChange(of: geo.size.width) { _, width in across = width }
+            .onChange(of: geo.size.height) { _, height in tall = height } } }
         .animation(Motion.glide, value: browser.prefs.sidebar)
         .animation(Motion.glide, value: browser.prefs.sidePosition)
         .onAppear { if room == nil { room = chrome } }
         .onChange(of: chrome) { old, new in make(room: new, after: old) }
+        // ⌘S folding the column: the page its room now, the column still
+        // out over it, its far side past the window's edge; called off, the
+        // column's room back. Never slid: what moves is the column, after.
+        .onChange(of: browser.foldingAway) { _, away in
+            roomTicket += 1
+            var still = Transaction()
+            still.disablesAnimations = true
+            withTransaction(still) {
+                if away, sidebar { room = CGSize(width: foldedWidth, height: roomed.height) } else { room = chrome }
+            }
+        }
     }
 
     // With Split View off, the stage is the one it always was: a single
@@ -629,6 +645,10 @@ struct ContentView: View {
         }
         return CGSize(width: sidebar ? sideWidth : 0, height: band + bar)
     }
+
+    /// The column's width folded away: the room ⌘S gives the page before
+    /// the column slides (see Browser.toggleFold).
+    private var foldedWidth: CGFloat { cards ? Metrics.cardGap : 0 }
 
     /// The column's width: the setting, or where its edge is while held.
     private var sideWidth: CGFloat { edges.side ?? browser.prefs.columnWidth }
@@ -725,6 +745,9 @@ struct ContentView: View {
     private var bars: some View {
         VStack(spacing: 8) {
             announcement
+            // A coding agent's question; never anything over the page once
+            // it is answered (AgentBanner).
+            AgentBar(browser: browser)
             if let ask = browser.asking {
                 Group {
                     if ask.screen { ScreenQuestion(browser: browser, ask: ask) }
@@ -865,6 +888,10 @@ struct ContentView: View {
                 if let job = browser.fileImport { ImportProgress(browser: browser, job: job) }
             }
             .environment(\.tabShortcutNumbers, browser.tabShortcutNumbers)
+            // One gradient across the column, the bars and the ground alike.
+            .environment(\.washRoom, CGSize(width: across, height: tall))
+            // And as strongly, Subtle, Rich or Vivid, as the space on screen asks.
+            .environment(\.washStrength, browser.washStrength)
             // The field comes on its spring, and goes quickly: once Return
             // is pressed the page is on its way, and the field is not what
             // there is to watch.
@@ -1240,7 +1267,10 @@ struct ContentView: View {
             if Launcher.owns(event.window) { return event }
             guard mine(event) else { return event }
             guard event.type == .keyDown else {
-                let held = browser.prefs.showsTabShortcuts && event.modifierFlags.contains(.command)
+                // ⌃ with the tab numbers on it (Settings › Spaces & Pins) is
+                // also the switcher's: its cards are up, not the numbers.
+                let held = browser.prefs.showsTabShortcuts && KeyCombo.holdsTabNumbers(event.modifierFlags)
+                    && !(KeyCombo.spacesOnCommand && browser.tabSwitcher.active)
                 if browser.commandHeld != held { browser.commandHeld = held }
                 // ⌃ let go of switches to the tab the switcher is on — or
                 // whichever its key is held with (Settings › Shortcuts).
@@ -1341,12 +1371,12 @@ struct ContentView: View {
     }
 
     /// A key that goes to another tab or a new one: the switcher's, ⌘T,
-    /// ⌘1 through ⌘9.
+    /// ⌘1 through ⌘9 (⌃1–⌃9 while ⌘1–⌘9 switch spaces).
     private static func movesTab(_ event: NSEvent) -> Bool {
         if ShortcutStore.shared.recentSwitch(event) != nil { return true }
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return false }
-        if let number = digits[event.keyCode] { return number != 0 }
-        return event.shortcutCharacters == "t"
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if let number = digits[event.keyCode], number != 0, flags == KeyCombo.tabNumberModifier { return true }
+        return flags == .command && event.shortcutCharacters == "t"
     }
 
     /// The same handling the key monitor gives an event, for the bench to
@@ -1666,6 +1696,15 @@ struct ContentView: View {
             return browser.submitToShiftEngine()
         }
 
+        // ⌃1–⌃9 pick a tab while ⌘1–⌘9 switch spaces (Settings › Spaces &
+        // Pins), as in Arc: by the key, as ⌘1–⌘9 below, and before any
+        // command a ⌃ digit was given while it was free.
+        if KeyCombo.spacesOnCommand, flags.intersection([.command, .shift, .option, .control]) == .control,
+           let number = ContentView.digits[event.keyCode], number != 0 {
+            browser.select(index: number == 9 ? browser.tabShortcutTargets.count - 1 : number - 1)
+            return true
+        }
+
         // Space keys have no menu; other commands arrive here when rebound.
         // A key taken off a command goes back to the page.
         if ShortcutStore.shared.anyChanged || browser.prefs.usesSpaces, let combo = KeyCombo(event: event) {
@@ -1748,6 +1787,9 @@ struct ContentView: View {
         if !shifted, let number = ContentView.digits[event.keyCode] {
             if number == 0 {
                 browser.resetZoom()
+            } else if KeyCombo.spacesOnCommand {
+                // The spaces' (above), unless one was taken off: the page's then.
+                return false
             } else {
                 browser.select(index: number == 9 ? browser.tabShortcutTargets.count - 1 : number - 1)
             }

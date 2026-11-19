@@ -180,6 +180,9 @@ struct TabBar: View {
                     // Back, forward, reload, and the bookmarks, at the far end
                     // of the row. The dropdown hangs from the last one.
                     HStack(spacing: Metrics.tabGap) {
+                        // A coding agent allowed in this window: its pill and
+                        // Stop, here rather than over the page (AgentBanner).
+                        AgentStatus(browser: browser, style: .door)
                         // Only while a download is running, and a moment after.
                         FetchDoor(browser: browser, fetches: browser.fetches)
                         ExtensionSlot(browser: browser)
@@ -218,7 +221,7 @@ struct TabBar: View {
                 // The space's colour, if it has one, over whatever ground the
                 // row lies on: the window's, or the one it brings along when
                 // it comes down over the page.
-                SpaceWash(colour: browser.washColour)
+                SpaceWash(look: browser.wash)
                 if browser.prefs.splitView {
                     SplitDropZone(browser: browser, tab: nil, kind: .strip)
                 }
@@ -681,6 +684,9 @@ enum Rewind {
 /// It doesn't watch the Browser, as a row in the column doesn't (SideRow).
 private struct TabPill: View, Equatable {
     @Environment(\.tabShortcutNumbers) private var shortcutNumbers
+    /// Black or white with alpha, so on a space's colour the pills take its
+    /// tint rather than sit on it as grey patches (see Greys).
+    @Environment(\.greys) private var greys
     @Environment(\.rowCarrying) private var rowCarrying
     let browser: Browser
     @ObservedObject var prefs: Preferences
@@ -847,6 +853,7 @@ private struct TabPill: View, Equatable {
                     Ring()
                 } else {
                     Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 15, dim: tab.asleep)
+                        .overlay(alignment: .bottomTrailing) { AgentMark(tab: tab) }
                 }
             }
             .frame(width: 16, height: 16)
@@ -872,12 +879,14 @@ private struct TabPill: View, Equatable {
             } else {
                 if !tab.isBlank {
                     Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 15)
+                        .overlay(alignment: .bottomTrailing) { AgentMark(tab: tab) }
                 }
-                if tab.bench {
+                if tab.bench, !tab.agent {
                     // A script's tab, not yours.
                     Image(systemName: "flask")
                         .font(.system(size: 9))
                         .foregroundStyle(colour.opacity(0.7))
+                        .help("Opened by a script")
                 }
                 if tab.shy {
                     // Quiet, and only on the tabs that keep nothing.
@@ -968,7 +977,7 @@ private struct TabPill: View, Equatable {
             ZStack(alignment: .leading) {
                 // A pinned square among the faint grey of the others: the
                 // darker grey the column's live pin wears too.
-                Rectangle().fill(pinned ? Palette.pinLive : Palette.wash)
+                Rectangle().fill(pinned ? greys.pinLive : greys.wash)
                 // Not on a pinned square, nor a tab down to its mark. Thirty
                 // points of grey filling from the left behind a single letter
                 // says nothing about anything — it needs the width of a title
@@ -981,10 +990,10 @@ private struct TabPill: View, Equatable {
             .matchedGeometryEffect(id: "live", in: pill)
         } else if selected {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Palette.wash)
+                .fill(greys.wash)
         } else if hovering {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Palette.hover)
+                .fill(greys.hover)
         } else if pinned || compact || rowCarrying {
             // A letter with nothing behind it reads as debris. A pinned tab
             // keeps a faint ground of its own so the block of them reads as
@@ -999,13 +1008,13 @@ private struct TabPill: View, Equatable {
             // its left under it too, and the half left showing was nothing,
             // so it seemed gone until the hand moved on (#898).
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Palette.wash.opacity(0.55))
+                .fill(greys.tile)
         }
     }
 
     private var colour: Color {
         if live { return Palette.ink }
-        return hovering ? Palette.ink.opacity(0.7) : Palette.muted
+        return hovering ? Palette.ink.opacity(0.7) : greys.muted
     }
 }
 
@@ -1371,7 +1380,8 @@ struct TabAddressField: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(browser: browser) }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
+        // The caret kept clear of the field's end (RoomyField).
+        let field = RoomyField()
         field.delegate = context.coordinator
         field.isBordered = false
         field.drawsBackground = false

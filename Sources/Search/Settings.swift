@@ -24,6 +24,9 @@ struct SettingsPanel: View {
     /// The keys rows name, as Settings › Shortcuts has them now.
     @ObservedObject private var shortcuts = ShortcutStore.shared
     @State private var isDefault = Links.isDefault
+    /// Whether Search opens email links, and which app does now.
+    @State private var mailDefault = Mail.isDefault
+    @State private var mailHandler = Mail.handlerName
     /// A site shortcut being written, kept out of Preferences until it's saved.
     @State private var draft: Keyword?
     @State private var page: Page = Page.named(Store.settings.string(forKey: "settings.page") ?? "") ?? .general
@@ -365,11 +368,13 @@ struct SettingsPanel: View {
 
     private func row(_ item: SettingsItem) -> some View {
         let counts = SettingsIndex.applies(item, prefs)
+        // The switch that swaps ⌘1–⌘9 and ⌃1–⌃9 names both as they were.
+        let relabel: (String) -> String = item.id == "spaces.commandNumbers" ? { $0 } : shortcuts.relabel
         return SettingRow(
             icon: item.icon,
-            title: shortcuts.relabel(title(of: item)),
-            detail: shortcuts.relabel(counts ? detail(of: item) : SettingsIndex.needs(item)),
-            more: counts ? item.more.map(shortcuts.relabel) : nil,
+            title: relabel(title(of: item)),
+            detail: relabel(counts ? detail(of: item) : SettingsIndex.needs(item)),
+            more: counts ? item.more.map(relabel) : nil,
             wide: item.kind == .wide,
             lit: lit == item.id
         ) {
@@ -421,6 +426,8 @@ struct SettingsPanel: View {
     private func title(of item: SettingsItem) -> String {
         switch item.id {
         case "updates.version": return versionTitle
+        // ⌃ while it picks the tabs (Settings › Spaces & Pins).
+        case "tabs.shortcuts" where prefs.usesSpaces && prefs.spacesOnCommand: return "Show tab numbers while ⌃ is held"
         default: return item.title
         }
     }
@@ -429,6 +436,9 @@ struct SettingsPanel: View {
         switch item.id {
         case "general.default":
             return isDefault ? "Search is the default browser on this Mac" : item.detail
+        case "mail.default":
+            if mailDefault { return "Email links from other apps open here" }
+            return mailHandler.map { "Email links from other apps go to \($0) now" } ?? item.detail
         case "downloads.folder":
             return prefs.downloads.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
         case "sync": return sync.on ? sync.summary : item.detail
@@ -485,6 +495,32 @@ struct SettingsPanel: View {
                     }
                 }
             }
+        case "mail.webmail":
+            Picker("", selection: $prefs.webmail) {
+                ForEach(Webmail.allCases) { mail in
+                    Text(mail.title).tag(mail)
+                    if mail == .none { Divider() }
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+        case "mail.default":
+            if mailDefault {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                    .frame(width: 24)
+            } else {
+                // Only ever from this click: macOS asks to confirm.
+                Pill("Make default", filled: true) {
+                    Mail.becomeDefault { worked in
+                        mailDefault = Mail.isDefault
+                        mailHandler = Mail.handlerName
+                        browser.announce(worked && mailDefault ? "Email links now open here" : "macOS didn't change it")
+                    }
+                }
+            }
         case "general.import":
             // Coming from another browser, now or any time later: the same
             // page as File › Bring Things Over… and the Welcome's.
@@ -524,6 +560,7 @@ struct SettingsPanel: View {
                         set: { layout in withAnimation(Motion.glide) { prefs.tabsLayout = layout } }
                      ))
         case "sidebar.hides": Switch(on: $prefs.sideHides)
+        case "sidebar.slides": Switch(on: $prefs.slidesColumn)
         case "sidebar.foldIcons": Switch(on: $prefs.foldsToIcons)
         case "layout.cards":
             Pictures(options: [(true, "As a card", AnyView(CardPicture(card: true))),
@@ -574,6 +611,7 @@ struct SettingsPanel: View {
         case "tabs.switcherBehindFirst": Switch(on: $prefs.switcherBehindFirst)
         case "tabs.switcherLeavesOutPins": Switch(on: $prefs.switcherLeavesOutPins)
         case "tabs.frontBeside": Switch(on: $prefs.frontLinksBeside)
+        case "tabs.mirror": Switch(on: $prefs.mirrorsTabs)
         case "tabs.lazy": Switch(on: $prefs.lazyTabs)
         case "tabs.popupWindows": Switch(on: $prefs.popupWindows)
         case "tabs.sleep":
@@ -687,6 +725,7 @@ struct SettingsPanel: View {
                 .disabled(!arcHere)
                 .opacity(arcHere ? 1 : 0.4)
         case "spaces": Switch(on: $prefs.usesSpaces)
+        case "spaces.commandNumbers": Switch(on: $prefs.spacesOnCommand)
         case "profiles": Pill("New Profile…") { ProfileMenu.askNew() }
         case "profiles.oneWindow": Switch(on: $prefs.profilesInOneWindow)
         case "spaces.links": Switch(on: $prefs.sendsLinksToSpaces)
@@ -754,16 +793,20 @@ struct SettingsPanel: View {
             .pickerStyle(.menu)
             .fixedSize()
         case "links.peek.stays": Switch(on: $prefs.peekStays)
+        case "links.optionSplit": Switch(on: $prefs.optionClickSplits)
         case "autoscroll": Switch(on: $prefs.autoScroll)
+        case "pages.bounce": Switch(on: $prefs.bounces)
         case "swipe.history": Switch(on: $prefs.holdsHistory)
         case "launcher.on": Switch(on: $prefs.launcher)
         case "launcher.key": LauncherKeyBox(prefs: prefs)
+        case "launcher.little": Switch(on: $prefs.launcherLittle)
         case "note.switcher": Always()
         case "updates.version": versionControl
         case "updates.auto": Switch(on: $prefs.installsUpdates)
         case "about.feedback": Pill("Send Feedback") { Links.writeFeedback() }
         case "about.notes": Pill("What's New…") { browser.lead(to: InternalPage(.notes)) }
         case "bench": Switch(on: $prefs.bench)
+        case "agents": Switch(on: $prefs.agents)
         default: EmptyView()
         }
     }
@@ -812,6 +855,8 @@ struct SettingsPanel: View {
                     }
                 }
             }
+        case "agents":
+            if !searched, prefs.agents { RememberedAgents() }
         case "passwords.apple":
             ApplePasswordsCard(prefs: prefs, bare: true)
                 .under()
@@ -1551,5 +1596,34 @@ private struct NotificationSites: View {
                 }
             }
         }
+    }
+}
+
+/// The coding agents you said to always allow (AgentTrust), each with who
+/// signed the program that starts it and when it was last let in, and
+/// Forget. Under "Let coding agents use Search".
+private struct RememberedAgents: View {
+    @ObservedObject private var trust = AgentTrust.shared
+
+    var body: some View {
+        ForEach(trust.remembered) { entry in
+            Rule()
+            SettingRow(icon: "checkmark.shield", title: entry.client,
+                       detail: (entry.suspended == true ? "Asked again since you stopped it" : "Allowed without asking")
+                           + " · signed by \(entry.signer) · last used \(Self.when(entry.used)) · until \(Self.day(entry.expires))",
+                       more: entry.path.isEmpty ? nil : "Started by \((entry.path as NSString).lastPathComponent) (\(entry.identifier), team \(entry.team)), last seen at \(entry.path). Let in only while that program still passes its code signature and it calls itself “\(entry.client)”.") {
+                Pill("Forget") { trust.forget(entry.id) }
+            }
+        }
+    }
+
+    private static func day(_ date: Date) -> String {
+        date.formatted(.dateTime.day().month(.abbreviated))
+    }
+
+    private static func when(_ date: Date) -> String {
+        let format = RelativeDateTimeFormatter()
+        format.unitsStyle = .full
+        return Date().timeIntervalSince(date) < 60 ? "just now" : format.localizedString(for: date, relativeTo: Date())
     }
 }

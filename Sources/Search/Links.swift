@@ -175,7 +175,7 @@ final class Links: NSObject, NSApplicationDelegate {
         // app would bring a window forward. The bench hands links in itself.
         guard !Store.testing else { return }
         guard let text = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
-              let url = URL(string: text), url.scheme?.lowercased().hasPrefix("http") == true
+              let url = URL(string: text), Links.takes(url)
         else { return }
         Links.take(url)
     }
@@ -186,7 +186,7 @@ final class Links: NSObject, NSApplicationDelegate {
     /// build.sh), which this used to drop without a word.
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !Store.testing else { return }
-        for url in urls where url.isFileURL || url.scheme?.lowercased().hasPrefix("http") == true {
+        for url in urls where url.isFileURL || Links.takes(url) {
             Links.take(url)
         }
     }
@@ -325,7 +325,29 @@ final class Links: NSObject, NSApplicationDelegate {
     /// A link as another app hands one over, for the bench.
     static func arrived(_ url: URL) { take(url) }
 
+    /// What another app may hand over: a web address, or an email link once
+    /// Search is the Mac's email app (build.sh declares mailto).
+    private static func takes(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased() ?? ""
+        return scheme.hasPrefix("http") || scheme == "mailto"
+    }
+
     private static func take(_ url: URL) {
+        // An email link: the webmail's compose page, which then goes where
+        // any link from another app goes — a tab, or a small window for
+        // whoever chose that. With no webmail chosen, the next app that
+        // takes email links, never Search again (see Mail.handToSystem).
+        if url.scheme?.lowercased() == "mailto" {
+            MainActor.assumeIsolated {
+                if let compose = Mail.compose(for: url) {
+                    if Store.testing { Mail.seen.append("app: " + compose.absoluteString) }
+                    take(compose)
+                } else {
+                    Mail.handToSystem(url)
+                }
+            }
+            return
+        }
         if MainActor.assumeIsolated({ little(url) }) { return }
         if let deliver {
             deliver(url)
@@ -347,6 +369,15 @@ final class Links: NSObject, NSApplicationDelegate {
         // A site sent to a space opens there, with that space's sign-ins.
         if SpaceRoutes.space(for: url) != nil { return false }
         if Shared.prefs.littleFindsTabs, goToOpen(url) { return true }
+        openLittle(url)
+        return true
+    }
+
+    /// A small window for `url`, and the browser's windows left where they
+    /// are: for a link from another app, and for the address field from
+    /// any app with its small window asked for (Launcher.submit).
+    @MainActor
+    static func openLittle(_ url: URL, for asked: Browser? = nil) {
         // Hidden (⌘H), the app comes forward for the small window and shows
         // every window it had: the browser's came up beside it, as if the
         // link had opened twice. They are kept away, as a launch's are.
@@ -355,10 +386,9 @@ final class Links: NSObject, NSApplicationDelegate {
             Browsers.putAway()
         }
         // The space and sign-ins of the window in front, on screen or not.
-        let browser = Browsers.front.flatMap { !$0.isPopup ? $0 : nil }
+        let browser = asked.flatMap { !$0.isPopup ? $0 : nil } ?? Browsers.front.flatMap { !$0.isPopup ? $0 : nil }
             ?? Browsers.primary ?? SceneSlot.shared.browser
         LittleWindow.show(url, for: browser)
-        return true
     }
 
     /// The page already open, for whoever asked for that in Settings: a
@@ -411,6 +441,20 @@ final class Links: NSObject, NSApplicationDelegate {
             URLQueryItem(name: "body", value: "\n\n—\nSearch \(Updater.version), build \(Updater.build), macOS \(ProcessInfo.processInfo.operatingSystemVersionString)"),
         ]
         guard let url = text.url else { return }
+        // With a webmail chosen, its compose page, in a tab of the window in
+        // front: no round trip through macOS, which may not send email
+        // links here at all.
+        let compose = MainActor.assumeIsolated { Mail.compose(for: url) }
+        if let compose {
+            MainActor.assumeIsolated {
+                if Store.testing { Mail.seen.append("feedback: " + compose.absoluteString) }
+                land(compose)
+                comeForward()
+            }
+            return
+        }
+        // A test run opens no other app (Tests/webmail.py).
+        if Store.testing { MainActor.assumeIsolated { Mail.seen.append("feedback: system") }; return }
         NSWorkspace.shared.open(url)
     }
 

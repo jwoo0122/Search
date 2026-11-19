@@ -614,6 +614,9 @@ final class Tab: ObservableObject, Identifiable {
     @Published var muted = false
     /// An extension is recording from this tab's page (see RecordingIndicator).
     @Published var recording = false
+    /// A coding agent is working in this tab now (AgentControl): a dot on
+    /// its icon's corner, gone once it moves on, goes idle or disconnects.
+    @Published var agentWorking = false
 
     /// Not `web`: a tab asleep is muted without being woken, and hears of
     /// it when its page is built again.
@@ -735,6 +738,10 @@ final class Tab: ObservableObject, Identifiable {
     /// the session or the history, and gone when the script is done.
     let bench: Bool
 
+    /// A bench tab a coding agent opened (AgentControl): marked as its own
+    /// in the row, and kept to the web.
+    var agent = false
+
     /// The tab whose page opened this one, when a script did. Sign-in flows
     /// hand you back to it when they are done.
     var opener: Tab.ID?
@@ -772,6 +779,11 @@ final class Tab: ObservableObject, Identifiable {
     /// For a pinned row, the folder among the rows that holds it (see
     /// PinFolders.swift). Set when the row is built, from pins.json.
     var pinFolder: UUID?
+
+    /// For an open tab that isn't a pin, which of the open tabs it is, in
+    /// every window, while Settings › Tabs › Same tabs in every window is on
+    /// (see Twins.swift). Each window holds its own tab for it, as for a pin.
+    var twinID: UUID?
 
     /// The group that holds this ordinary tab in the sidebar.
     @Published var groupID: UUID? {
@@ -2073,6 +2085,10 @@ final class Tab: ObservableObject, Identifiable {
         if !blockedPopups.isEmpty { blockedPopups = [] }
         translationGone(sleeping: true)
         watch = []
+        // The page still loading goes with its view, and what said so goes
+        // first: its stopLoading below is heard by no one. Left set, a pin
+        // put down mid-load spun on its row for good.
+        if loading { loading = false }
         ears.stop()
         noisy = false
         quiet?.invalidate()
@@ -2448,6 +2464,9 @@ final class PageView: WKWebView {
         // comes up, the way a hand would choose it, and the menu goes.
         if Store.testing, let title = PageView.picking {
             PageView.picking = nil
+            PageView.lastMenu = menu.items.filter { !$0.isSeparatorItem }.map { item in
+                item.submenu.map { sub in item.title + " › " + sub.items.filter { !$0.isSeparatorItem }.map(\.title).joined(separator: " | ") } ?? item.title
+            }
             RunLoop.main.perform(inModes: [.eventTracking, .default]) {
                 if let index = menu.items.firstIndex(where: { $0.title == title }) { menu.performActionForItem(at: index) }
                 menu.cancelTracking()
@@ -2495,6 +2514,8 @@ final class PageView: WKWebView {
 
     /// The item the bench's linkmenu will choose in the next menu.
     static var picking: String?
+    /// The titles of the last menu the bench's linkmenu opened.
+    static var lastMenu: [String] = []
     var searchName: (() -> String?)?
     var onSearch: ((String) -> Void)?
     private var selection: String?

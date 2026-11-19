@@ -28,6 +28,14 @@ enum ExtensionShims {
     /// The name native messages to the browser itself go to.
     static let application = "search"
     nonisolated static let file = "search-shim.js"
+    /// What content scripts carry instead: the shim up to the point where a
+    /// content script's run of it returns, so the same code with nothing
+    /// after it. A frame parses whatever its content scripts carry, every
+    /// time it loads, once for each entry that names it; the whole shim is
+    /// 230 KB, almost all of it for the worker and the extension's pages,
+    /// and a content script never runs a line of that part (see contentShim).
+    nonisolated static let contentFile = "search-shim-content.js"
+    nonisolated static let contentEnd = "/* Search: a content script's shim ends here */"
     /// Search's passkey patch, put first in every script an extension runs in
     /// a page's own world (see Passkeys.swift, and `first` in the script).
     nonisolated static let passkeys = "search-passkeys.js"
@@ -67,6 +75,7 @@ enum ExtensionShims {
 
         let script = shim(for: folder).replacingOccurrences(of: "__SEARCH_WORKER_GENERATION__", with: String(workerGeneration))
         try script.write(to: folder.appendingPathComponent(file), atomically: true, encoding: .utf8)
+        try contentShim(script).write(to: folder.appendingPathComponent(contentFile), atomically: true, encoding: .utf8)
         try PasskeyRelay.page.write(to: folder.appendingPathComponent(passkeys), atomically: true, encoding: .utf8)
 
         // Native messaging is how the shim reaches the browser; user scripts
@@ -122,17 +131,21 @@ enum ExtensionShims {
             manifest["background"] = background
         }
 
-        // Content scripts too — there only Chrome's behaviour is mended. One
-        // that runs in the page's own world has Search's passkey patch before
-        // it: a password manager's there keeps a reference to
-        // navigator.credentials as it finds it, and that has to be Search's,
-        // not WebKit's (see Passkeys.swift).
+        // Content scripts too — there only Chrome's behaviour is mended, so
+        // they carry only the part of the shim a content script runs
+        // (contentShim). One that runs in the page's own world has Search's
+        // passkey patch before it instead: a password manager's there keeps
+        // a reference to navigator.credentials as it finds it, and that has
+        // to be Search's, not WebKit's (see Passkeys.swift). It used to carry
+        // the shim as well, which a page's world has no extension APIs for:
+        // the shim returned at its first check, after every frame of every
+        // page had parsed all of it.
         //
         // Entries that run in the same place at the same time share one copy
         // rather than each carrying its own: WebKit parses a content script
-        // once per entry per frame, and the shim is 200 KB, so a manifest
-        // with three <all_urls> entries paid for it three times in every
-        // frame of a page. Only `matches` is pooled, and only between entries
+        // once per entry per frame, and even a content script's part of the
+        // shim is 70 KB, so a manifest with three <all_urls> entries paid for
+        // it three times in every frame of a page. Only `matches` is pooled, and only between entries
         // that agree on everything else, so the shared copy never reaches a
         // page the extension's own scripts would not: Catppuccin's one entry
         // names eight forges, and would otherwise have carried the shim
@@ -155,8 +168,8 @@ enum ExtensionShims {
             var own: [[String: Any]] = []
             for var entry in entries {
                 guard var js = entry["js"] as? [String] else { own.append(entry); continue }
-                if entry["css"] == nil, js == [file] || js == [passkeys, file] { continue }
-                js.removeAll { $0 == file || $0 == passkeys }
+                if entry["css"] == nil, [[file], [passkeys, file], [contentFile], [passkeys, contentFile]].contains(js) { continue }
+                js.removeAll { $0 == file || $0 == contentFile || $0 == passkeys }
                 if js.isEmpty, entry["css"] == nil { continue }
                 entry["js"] = js
                 own.append(entry)
@@ -197,14 +210,17 @@ enum ExtensionShims {
                 guard let pool = pools[key] else { continue }
                 var entry = pool.place
                 entry["matches"] = pool.matches
-                entry["js"] = (pool.place["world"] as? String)?.uppercased() == "MAIN" ? [passkeys, file] : [file]
+                entry["js"] = (pool.place["world"] as? String)?.uppercased() == "MAIN" ? [passkeys] : [contentFile]
                 shimmed.append(entry)
             }
             manifest["content_scripts"] = shimmed + own.map { entry -> [String: Any] in
                 var entry = entry
                 guard var js = entry["js"] as? [String], !shared.contains(place(entry)) else { return entry }
-                js.insert(file, at: 0)
-                if (entry["world"] as? String)?.uppercased() == "MAIN" { js.insert(passkeys, at: 0) }
+                if (entry["world"] as? String)?.uppercased() == "MAIN" {
+                    js.insert(passkeys, at: 0)
+                } else {
+                    js.insert(contentFile, at: 0)
+                }
                 entry["js"] = js
                 return entry
             }
@@ -454,6 +470,23 @@ enum ExtensionShims {
             .replacingOccurrences(of: "__SEARCH_VERBOSE__", with: Store.testing ? "true" : "false")
     }
 
+    /// The shim as a content script runs it: everything up to the `return`
+    /// that ends a content script's run, then the function closed. Nothing
+    /// after that point is declared before it (no function declarations to
+    /// hoist; the names after it are only ever read after it), so a content
+    /// script does exactly what it did with the whole file. Without the
+    /// mark, the whole shim, as before.
+    ///
+    /// A frame often gets it more than once, from each entry that carries
+    /// it (uBlock Origin Lite registers two for every frame); every copy
+    /// after the first returns at its first check. Asked before the
+    /// function rather than inside it, that check spares those copies
+    /// compiling the function at all: it is only read, not built.
+    nonisolated static func contentShim(_ full: String) -> String {
+        guard let end = full.range(of: contentEnd) else { return full }
+        return "if (!globalThis.__searchShim) " + String(full[..<end.lowerBound]) + "})();\n"
+    }
+
     /// Defines only what is missing, so the day WebKit implements an API,
     /// WebKit's is the one used.
     nonisolated static let script = #"""
@@ -546,12 +579,104 @@ enum ExtensionShims {
         // can't be shadowed, and a page whose script starts with its own
         // `const browser` (Control Panel for YouTube's popup) threw before
         // a line of it ran. `chrome` alone keeps WebKit's listeners.
-        try { Object.defineProperty(root, key, { configurable: key === "browser", enumerable: d.enumerable, get: () => value, set: (v) => { if (carries(v)) value = v; } }); } catch (e) {}
+        // In the worker, though, `browser` keeps WebKit's own object. With a
+        // replacement there WebKit stops handing the worker its events:
+        // webextension-polyfill, which Cosmos's worker loads, doesn't take
+        // WebKit's `browser` for a native one (its prototype isn't Object's)
+        // and puts its wrapper of `chrome` there, and action.onClicked never
+        // came again — Cosmos's button, and the one on its images, did
+        // nothing. WebKit's `browser` already is what the polyfill makes.
+        const ownBrowser = key === "browser" && typeof ServiceWorkerGlobalScope !== "undefined" && root instanceof ServiceWorkerGlobalScope;
+        try { Object.defineProperty(root, key, { configurable: key === "browser", enumerable: d.enumerable, get: () => value, set: (v) => { if (!ownBrowser && carries(v)) value = v; } }); } catch (e) {}
       }
       // On a web page this is a content script: only Chrome's behaviour is
       // mended there, no API that Chrome doesn't give content scripts either.
       const inContent = typeof location !== "undefined" && !/^(chrome|webkit)-extension:$/.test(location.protocol);
       const runtime = chrome.runtime;
+      // A <script src> of the extension's own that a content script puts in
+      // the page runs there whatever the page's Content Security Policy, in
+      // Chrome. WebKit holds it to the page's: YouTube's script-src names no
+      // extension, and Language Reactor's and Ambient light's scripts never
+      // ran — nothing of theirs showed. So a script element this content
+      // script inserted, with its own extension's address, that the page's
+      // policy refuses (a trusted securitypolicyviolation), is run by the
+      // browser in the page instead (ExtensionPageScript: asked through a
+      // handler only this extension's content scripts can reach; only a file
+      // the manifest makes web-accessible to that page, only in the top
+      // frame), and the element then hears load, or error, as it would have. Nothing else changes: a page without
+      // such a policy loads the script itself, as before.
+      if (inContent && runtime && typeof runtime.getURL === "function" && typeof document !== "undefined"
+          && root.HTMLScriptElement && root.Node && Element) {
+        const own = runtime.getURL("");
+        // The address as the content script writes it: read back, WebKit
+        // gives an extension's address masked (webkit-masked-url://hidden/),
+        // the attribute as well as the property.
+        const written = new WeakMap();
+        const scriptSrc = Object.getOwnPropertyDescriptor(root.HTMLScriptElement.prototype, "src");
+        if (scriptSrc && scriptSrc.set) {
+          Object.defineProperty(root.HTMLScriptElement.prototype, "src", { ...scriptSrc, set(value) {
+            try { written.set(this, String(value)); } catch (e) {}
+            return scriptSrc.set.call(this, value);
+          } });
+        }
+        const setAttribute = Element.prototype.setAttribute;
+        Object.defineProperty(Element.prototype, "setAttribute", { configurable: true, writable: true, value: function (name, value) {
+          try { if (this instanceof root.HTMLScriptElement && String(name).toLowerCase() === "src") written.set(this, String(value)); } catch (e) {}
+          return setAttribute.apply(this, arguments);
+        } });
+        // Element → its address, while the page's policy may still refuse it.
+        const ours = new Map();
+        const note = (node) => {
+          try {
+            if (!(node instanceof root.HTMLScriptElement) || !written.has(node)) return;
+            const address = new URL(written.get(node), document.baseURI).href;
+            if (!address.startsWith(own)) return;
+            ours.set(node, address);
+            setTimeout(() => ours.delete(node), 30000);
+          } catch (e) {}
+        };
+        const watch = (proto, name, all) => {
+          const f = proto && proto[name];
+          if (typeof f !== "function") return;
+          Object.defineProperty(proto, name, { configurable: true, writable: true, value: function (...args) {
+            if (all) args.forEach(note); else note(args[0]);
+            return f.apply(this, args);
+          } });
+        };
+        watch(root.Node.prototype, "appendChild");
+        watch(root.Node.prototype, "insertBefore");
+        watch(root.Node.prototype, "replaceChild");
+        for (const name of ["append", "prepend", "after", "before", "replaceWith"]) watch(Element.prototype, name, true);
+        if (Element.prototype.insertAdjacentElement) {
+          const f = Element.prototype.insertAdjacentElement;
+          Object.defineProperty(Element.prototype, "insertAdjacentElement", { configurable: true, writable: true, value: function (where, node) { note(node); return f.call(this, where, node); } });
+        }
+        // Taken now: the page can't reach this world, and WebKit gives the
+        // browser the tab and frame a message comes from.
+        const pageScript = root.webkit && root.webkit.messageHandlers && root.webkit.messageHandlers.searchPageScript;
+        document.addEventListener("securitypolicyviolation", (event) => {
+          if (!pageScript || !event.isTrusted) return;
+          if (event.disposition !== "enforce" || !/^script-src/.test(String(event.effectiveDirective || event.violatedDirective))) return;
+          const element = ours.has(event.target) ? event.target : [...ours.keys()].find((s) => ours.get(s) === event.blockedURI);
+          if (!element) return;
+          const address = ours.get(element);
+          ours.delete(element);
+          const token = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+          const path = new URL(address).pathname;
+          // The browser's script asks for its element by an event; this
+          // world hands it over by dispatching on the element itself.
+          const name = "search-page-script-" + token;
+          const handOver = () => element.dispatchEvent(new Event(name));
+          document.addEventListener(name + "-ask", handOver);
+          const done = (ran) => {
+            document.removeEventListener(name + "-ask", handOver);
+            element.dispatchEvent(new Event(ran ? "load" : "error"));
+          };
+          if (element.type === "module") { done(false); return; }
+          Promise.resolve(pageScript.postMessage({ path, token }))
+            .then((reply) => done(!!(reply && reply.ran)), () => done(false));
+        }, true);
+      }
       // WebKit fills Chrome's enums on a worker but leaves them out of a
       // content script, where extensions read them as their code starts.
       // GPTZero's copy tracker, LMS bridge and recorder stopped on a missing
@@ -664,6 +789,35 @@ enum ExtensionShims {
       // calls sendResponse or returns true. So the extension's listeners are
       // gathered behind a single one of WebKit's that follows Chrome's rule.
       const worker = typeof ServiceWorkerGlobalScope !== "undefined" && root instanceof ServiceWorkerGlobalScope;
+      // The extension's declarativeNetRequest rules that change request
+      // headers, as it wrote them ("updateSessionRules:<id>" and
+      // "updateDynamicRules:<id>"). WebKit applies them to its own requests,
+      // but not to the extension's fetches the browser sends
+      // (ExtensionFetch), which then went without them: VOT's translation
+      // request lost the headers its rule sets for its service, and was
+      // refused. Those are handed over with each such fetch; the browser
+      // applies what matches, only to an address the extension has.
+      const headerRules = new Map();
+      // Chrome's worker has no background page to get: neither
+      // extension.getBackgroundPage nor runtime.getBackgroundPage is there.
+      // WebKit has both, and code that tells its background from its pages
+      // by `getBackgroundPage() === window` then reads `window`, which a
+      // worker doesn't have: Eagle's worker threw so as it loaded its logger,
+      // tabs and fetch, never answered its pages, and saved nothing. WebKit
+      // won't let the method be removed or covered on its own objects, nor
+      // the worker's `chrome` be replaced (its events stop). So the name
+      // `window` reads as undefined in the worker instead of throwing:
+      // `typeof window` and `self.window` are as before, and a worker that
+      // sets `self.window` itself gets what it set.
+      if (worker && !("window" in root)) {
+        try {
+          Object.defineProperty(root, "window", {
+            configurable: true, enumerable: false,
+            get: () => undefined,
+            set(value) { Object.defineProperty(root, "window", { value, configurable: true, writable: true, enumerable: true }); },
+          });
+        } catch (e) {}
+      }
       // The extension's background, whichever WebKit runs: the worker, or a
       // page — it picks the page when a manifest names scripts as well.
       const background = worker || (!inContent && typeof document !== "undefined" && (() => {
@@ -932,7 +1086,23 @@ enum ExtensionShims {
             credentials = init && init.credentials !== undefined ? String(init.credentials)
               : (input instanceof Request ? input.credentials : "same-origin");
           } catch (e) { return original.apply(self, args); }
-          if (credentials !== "include" && (worker || credentials !== "same-origin")) return original.apply(self, args);
+          // From the worker, also any fetch to an app on this Mac (localhost,
+          // 127.0.0.1, [::1]): WebKit holds a worker's fetch to CORS even for
+          // a host the extension declares, and an app's local server
+          // (Eagle's, on localhost:41595) sends no CORS headers, as Chrome
+          // never asks for them. The request got there and its answer was
+          // thrown away: "Load failed", and nothing saved to Eagle. The
+          // browser still sends it only if the extension has been granted
+          // the address.
+          const loopback = () => {
+            try {
+              const u = new URL(input instanceof Request ? input.url : String(input), root.location.href);
+              return /^https?:$/.test(u.protocol) && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+            } catch (e) { return false; }
+          };
+          if (credentials !== "include" && (worker || credentials !== "same-origin") && !(worker && loopback())) {
+            return original.apply(self, args);
+          }
           // A copy to read, so the page's own Request keeps its body for
           // WebKit's fetch if the browser passes.
           let request, url;
@@ -946,7 +1116,8 @@ enum ExtensionShims {
             }
             const id = ++sequence + "-" + Math.random().toString(36).slice(2);
             const hello = { fetch: id, url: request.url, method: request.method, headers: [...request.headers], body,
-                            redirect: request.redirect, userAgent: navigator.userAgent };
+                            redirect: request.redirect, userAgent: navigator.userAgent, credentials,
+                            headerRules: headerRules.size ? [...headerRules.values()] : undefined };
             return await new Promise((resolve, reject) => {
               let port;
               try { port = connect("search.fetch"); } catch (e) { resolve(original.apply(self, args)); return; }
@@ -1215,6 +1386,33 @@ enum ExtensionShims {
         if (n > 0) { if (map.size > 200) map.clear(); map.set(key, { n, at: now }); } else map.delete(key);
       };
       const pending = (map, key) => { const v = map.get(key); return !!v && Date.now() - v.at <= 5000 && v.n > 0; };
+      // The messages the worker answers, heard lately, for the extension's
+      // pages framed in websites, which can't hear its word on the channel
+      // (see `answeredByWorker`). Not one too big to keep a copy of.
+      const answering = new Map();
+      const answers = (message) => {
+        const key = relayKey(message);
+        if (!key || key.length > 20000) return;
+        const now = Date.now();
+        for (const [k, at] of answering) { if (now - at > 60000) answering.delete(k); else break; }
+        if (answering.size > 200) answering.delete(answering.keys().next().value);
+        answering.delete(key);
+        answering.set(key, now);
+      };
+      // Asked from a framed page: a moment first, for the worker to hear the
+      // message too, then a few times more while it hasn't said it answers.
+      const answeredByWorker = (message, then) => {
+        const key = relayKey(message);
+        if (!key || key.length > 20000 || !runtime) return;
+        let tries = 0;
+        const ask = () => Promise.resolve(Object.getPrototypeOf(runtime).sendMessage.call(runtime, { __searchAnswers: key }))
+          .catch(() => null)
+          .then((said) => {
+            if (said === true) return then();
+            if (++tries < 4) setTimeout(ask, 500 * tries);
+          });
+        setTimeout(ask, 100);
+      };
       let deliverRelayed = null, relaying = false;
       const relay = (message) => { if (channel && !inContent) try { channel.postMessage({ relay: message, from: me, url: location.href }); } catch (e) {} };
       if (channel) {
@@ -1319,6 +1517,15 @@ enum ExtensionShims {
             if (background) { sendResponse("pong"); return; }
             return true;
           }
+          // One of the extension's pages framed in a website asking whether
+          // the worker answers a message they both heard (see
+          // `answeredByWorker`). Only the worker says.
+          if (message && typeof message.__searchAnswers === "string") {
+            if (!fromOwnPages(sender)) return;
+            if (!background) return true;
+            sendResponse(answering.has(message.__searchAnswers));
+            return;
+          }
           // Search's own envelopes come from this extension only: another
           // extension (onMessageExternal) could otherwise speak as one of its
           // user scripts, or as a frame of its own.
@@ -1389,6 +1596,7 @@ enum ExtensionShims {
             else if (result && typeof result.then === "function") { keep = true; result.then(sendResponse, () => sendResponse(undefined)); }
           }
           if (!local && !inContent) tell(message, keep || settled ? "answers" : "passes", true);
+          if (!local && background && keep && !settled) answers(message);
           if (keep || settled) return keep && !settled ? true : undefined;
           // A direct offscreen delivery has no other local receiver to wait for.
           if (local) return undefined;
@@ -1409,6 +1617,15 @@ enum ExtensionShims {
             let check = () => {}, roll = null;
             const done = () => { waiting.delete(check); clearTimeout(late); clearTimeout(roll); };
             const late = setTimeout(() => { done(); sendResponse(undefined); }, 10000);
+            // A page framed in a website hears nothing on the channel, and
+            // its nothing after ten seconds took the place of an answer the
+            // worker gives later: 1Password's worker answers a site's passkey
+            // request once you pick one in its prompt, and its menu or
+            // prompt, framed in another tab, answered first — the passkey
+            // never reached the site, which stayed on its sign-in page (idea
+            // 702). So it asks the worker itself, and keeps quiet for good
+            // if the worker answers.
+            if (!key && embedded && hasWorker) answeredByWorker(message, () => { if (!settled) done(); });
             if (key) {
               // Only what was said about this message, not an identical one
               // a while ago.
@@ -1703,6 +1920,7 @@ enum ExtensionShims {
         }
         return;
       }
+      /* Search: a content script's shim ends here */
 
       // An extension's page framed in a website, as Vimium's Vomnibar is:
       // its content script focuses the frame on a key press, and the page
@@ -1875,7 +2093,12 @@ enum ExtensionShims {
             }
           }).finally(() => { asking = false; });
         };
-        checkWorker = page ? check : () => {};
+        // Never from the background itself: a background page (WebKit makes
+        // one when a manifest names scripts beside its worker, as Language
+        // Reactor's does) is what would answer, and its own message never
+        // reaches it — every check came back empty, and the extension was
+        // restarted over and over.
+        checkWorker = page && !background ? check : () => {};
         put(runtime, "sendMessage", (...args) => {
           const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
           // Never heard back by the one that sends it, so said for it.
@@ -2897,7 +3120,47 @@ enum ExtensionShims {
         if (patterns.length > 1 && (ids.length < patterns.length - 1 || ids.slice(0, patterns.length - 1).some((id) => taken.has(id)))) return [rule];
         return patterns.map((regexFilter, k) => ({ ...rule, id: k === 0 ? rule.id : ids[k - 1], condition: { ...c, regexFilter } }));
       };
-      const rawGet = {};
+      // A frame's own request (sub_frame) against initiatorDomains or
+      // excludedInitiatorDomains: WebKit checks the frame being loaded —
+      // still about:blank — where Chrome checks the page that holds it.
+      // Privacy Badger's "block soundcloud.com unless soundcloud.com asked"
+      // so blocked SoundCloud's own sign-in frame on soundcloud.com, and
+      // "Sign in" did nothing (idea 712); a rule for frames that given
+      // pages hold let them through. The frame part of such a rule becomes
+      // a rule of its own with the same sites as domains/excludedDomains,
+      // which WebKit checks against the page; everything else stays with
+      // the rule as written, which WebKit checks as Chrome does. Its id is
+      // the last of the rule's own made ids, out of sight like the others.
+      const frameIds = (id) => { const ids = madeIds(id); return ids.length ? ids[ids.length - 1] : null; };
+      const framePart = (rule) => {
+        const c = rule && rule.condition;
+        if (!c || (c.initiatorDomains === undefined && c.excludedInitiatorDomains === undefined)) return null;
+        if (c.domains !== undefined || c.excludedDomains !== undefined) return null;
+        const types = c.resourceTypes;
+        if (Array.isArray(types) ? !types.includes("sub_frame") : (c.excludedResourceTypes || []).includes("sub_frame")) return null;
+        const rest = { ...c };
+        if (Array.isArray(types)) {
+          rest.resourceTypes = types.filter((t) => t !== "sub_frame");
+        } else {
+          rest.excludedResourceTypes = [...(c.excludedResourceTypes || ["main_frame"]), "sub_frame"];
+        }
+        const frame = { ...c, resourceTypes: ["sub_frame"] };
+        delete frame.excludedResourceTypes;
+        delete frame.initiatorDomains; delete frame.excludedInitiatorDomains;
+        if (c.initiatorDomains !== undefined) frame.domains = c.initiatorDomains;
+        if (c.excludedInitiatorDomains !== undefined) frame.excludedDomains = c.excludedInitiatorDomains;
+        // A rule for frames alone stays one rule, under its own id.
+        if (Array.isArray(rest.resourceTypes) && !rest.resourceTypes.length) return { rest: null, frame: { ...rule, condition: frame } };
+        const id = frameIds(rule.id);
+        if (id === null) return null;
+        return { rest: { ...rule, condition: rest }, frame: { ...rule, id, condition: frame } };
+      };
+      const splitFrames = (rule, taken) => {
+        const part = framePart(rule);
+        if (part && part.rest && taken && taken.has(part.frame.id)) return [rule];
+        return part ? [part.rest, part.frame].filter(Boolean) : [rule];
+      };
+      const rawGet = {}, rawUpdate = {};
       for (const [get, name] of [["getSessionRules", "updateSessionRules"], ["getDynamicRules", "updateDynamicRules"]]) {
         if (!dnr || typeof dnr[get] !== "function") continue;
         const original = dnr[get].bind(dnr);
@@ -2929,7 +3192,9 @@ enum ExtensionShims {
       if (dnr) for (const name of ["updateSessionRules", "updateDynamicRules"]) {
         if (typeof dnr[name] !== "function") continue;
         const original = dnr[name].bind(dnr);
+        rawUpdate[name] = original;
         put(dnr, name, (options = {}, callback) => {
+          const given = options;
           const ready = (rawGet[name] ? rawGet[name]() : Promise.resolve([])).catch(() => []).then((all) => {
             const present = new Set(all.map((r) => r.id));
             if (options && Array.isArray(options.removeRuleIds)) {
@@ -2941,7 +3206,7 @@ enum ExtensionShims {
               const leaving = new Set(options.removeRuleIds || []);
               const taken = new Set([...present].filter((id) => !leaving.has(id) && !leaving.has(madeFrom(id, present))));
               options.addRules.forEach((r) => r && taken.add(r.id));
-              options = { ...options, addRules: options.addRules.map(mendRule).filter(Boolean).flatMap((r) => spread(name, r, taken)) };
+              options = { ...options, addRules: options.addRules.map(mendRule).filter(Boolean).flatMap((r) => spread(name, r, taken)).flatMap((r) => splitFrames(r, taken)) };
             }
           });
           const attempt = async (opts, left) => {
@@ -2967,18 +3232,81 @@ enum ExtensionShims {
               if (!at || !Array.isArray(opts.addRules) || left <= 0) throw e;
               const index = Number(at[1]);
               const rule = opts.addRules[index];
+              // A header WebKit has no name for (VOT's x-client-data): only
+              // that header is left out of the rule, the rest of it stays.
+              // The browser still applies the whole rule to the extension's
+              // own fetches it sends (see headerRules).
+              const unknown = /The header `([^`]+)` is not recognized/.exec(String(e && e.message));
+              if (unknown && rule && rule.action && rule.action.type === "modifyHeaders") {
+                const name = unknown[1].toLowerCase();
+                const keep = (list) => Array.isArray(list) ? list.filter((h) => !h || String(h.header).toLowerCase() !== name) : list;
+                const action = { ...rule.action, requestHeaders: keep(rule.action.requestHeaders), responseHeaders: keep(rule.action.responseHeaders) };
+                if (!action.requestHeaders || !action.requestHeaders.length) delete action.requestHeaders;
+                if (!action.responseHeaders || !action.responseHeaders.length) delete action.responseHeaders;
+                try { native("debug.error", ["declarativeNetRequest: header " + unknown[1] + " left out of rule " + rule.id + " — WebKit doesn't know it"]).catch(() => {}); } catch (x) {}
+                const mended = action.requestHeaders || action.responseHeaders ? { ...rule, action } : null;
+                return attempt({ ...opts, addRules: opts.addRules.flatMap((r, i) => i !== index ? [r] : mended ? [mended] : []) }, left - 1);
+              }
               try { native("debug.error", ["declarativeNetRequest: rule " + (rule && rule.id) + " left out — " + e.message]).catch(() => {}); } catch (x) {}
               return attempt({ ...opts, addRules: opts.addRules.filter((_, i) => i !== index) }, left - 1);
             }
           };
           const p = ready.then(() => attempt(options, 100));
           p.then(built, () => {});
+          // Its request-header rules, as it wrote them, for its own fetches
+          // the browser sends (see headerRules) — with its allow rules, which
+          // outrank them by priority — once WebKit has the update. Only
+          // rules WebKit kept: one it dropped whole doesn't apply anywhere.
+          p.then(() => (rawGet[name] ? rawGet[name]() : Promise.resolve([]))).then((all) => {
+            const present = new Set(all.map((r) => r.id));
+            const kept = (id) => present.has(id) || all.some((r) => madeFrom(r.id, present) === id);
+            for (const id of (given && given.removeRuleIds) || []) headerRules.delete(name + ":" + id);
+            for (const rule of (given && given.addRules) || []) {
+              const type = rule && rule.action && rule.action.type;
+              if (!(type === "modifyHeaders" && Array.isArray(rule.action.requestHeaders)) && type !== "allow") continue;
+              if (!kept(rule.id)) continue;
+              const regex = rule.condition && rule.condition.regexFilter;
+              if (typeof regex === "string" && (regex.length > 2048 || /\\[1-9]|\\k<|\(\?<?[=!]/.test(regex))) {
+                try { native("debug.error", ["declarativeNetRequest: rule " + rule.id + " isn't applied to requests the browser sends — its regexFilter is one Chrome wouldn't take"]).catch(() => {}); } catch (x) {}
+                continue;
+              }
+              if (headerRules.size >= 500 && !headerRules.has(name + ":" + rule.id)) {
+                if (!headerRules.full) {
+                  headerRules.full = true;
+                  try { native("debug.error", ["declarativeNetRequest: header rules beyond 500 aren't applied to requests the browser sends"]).catch(() => {}); } catch (x) {}
+                }
+                continue;
+              }
+              try { headerRules.set(name + ":" + rule.id, JSON.parse(JSON.stringify(rule))); } catch (e) {}
+            }
+          }).catch(() => {});
           // In a test run, an update that still fails is said, not only
           // handed back to an extension that may drop it.
           if (__SEARCH_VERBOSE__) p.catch((e) => { try { native("debug.error", ["declarativeNetRequest: " + name + " failed — " + (e && e.message)]).catch(() => {}); } catch (x) {} });
           if (typeof callback !== "function") return p;
           p.then(() => callback(), (e) => withLastError(e, callback));
         });
+      }
+      // The rules already in place when the worker starts again: WebKit's
+      // copy, which is all there is of them now.
+      if (dnr) for (const name of ["updateSessionRules", "updateDynamicRules"]) {
+        if (!rawGet[name]) continue;
+        rawGet[name]().then((all) => {
+          // Rules stored before their frame part was split off (idea 712):
+          // split now. A split rule no longer names frames, so this happens once.
+          const present = new Set((all || []).map((r) => r.id));
+          const stale = (all || []).filter((r) => madeFrom(r.id, present) === null && framePart(r));
+          if (stale.length && rawUpdate[name]) {
+            Promise.resolve(rawUpdate[name]({ removeRuleIds: stale.map((r) => r.id), addRules: stale.flatMap((r) => splitFrames(r, present)) }))
+              .then(built, (e) => { if (__SEARCH_VERBOSE__) try { native("debug.error", ["declarativeNetRequest: frame rules not split — " + (e && e.message)]).catch(() => {}); } catch (x) {} });
+          }
+          for (const rule of all || []) {
+            const key = name + ":" + rule.id;
+            const type = rule && rule.action && rule.action.type;
+            if (((type === "modifyHeaders" && Array.isArray(rule.action.requestHeaders)) || type === "allow")
+                && !headerRules.has(key) && headerRules.size < 500) headerRules.set(key, rule);
+          }
+        }, () => {});
       }
 
       // Context menu entries for places Search has no menu for — the old
@@ -3331,7 +3659,7 @@ enum ExtensionShims {
         // Extensions.reachesExtensions): never held, never asked for. Nor
         // files, as in Chrome with file access left off (Extensions.reachesFiles).
         const extensionPages = (origins) => origins.some((o) => /^((chrome|webkit)-extension|file):/i.test(String(o)));
-        // <all_urls> is held as *://*/* once given (see Extensions.fence).
+        // <all_urls> is reached as *://*/* once given (see Extensions.fence).
         const websites = (origins) => origins.map((o) => (o === "<all_urls>" ? "*://*/*" : o));
         put(p, "contains", withCb(async ({ permissions = [], origins = [] }) => {
           origins = websites(origins);
@@ -3368,14 +3696,23 @@ enum ExtensionShims {
         put(p, "remove", withCb(async ({ permissions = [], origins = [] }) => {
           const { theirs, mine } = split(permissions);
           if (mine.length) await native("permissions.remove", [mine]);
-          const done = theirs.length || origins.length ? await remove({ permissions: theirs, origins }) : true;
           // <all_urls> given back gives back what it is held as, *://*/*,
           // too (see Extensions.fence): contains() then says no to both.
-          // Not when the manifest itself asks for every website: what it
-          // can't give back stays.
-          const required = new Set([...(manifest.host_permissions || []), ...(manifest.permissions || [])]);
-          const always = required.has("<all_urls>") || required.has("*://*/*");
-          if (done && !always && origins.some((o) => o === "<all_urls>" || o === "*://*/*")) await native("permissions.removeWebsites", []);
+          // Search takes those back itself, not WebKit, whose remove()
+          // took every site <all_urls> covers with them — the ones the
+          // manifest requires too, which Chrome keeps — and left the
+          // content scripts running everywhere (#705). Not when the
+          // manifest itself asks for every website, its content scripts
+          // included: what it can't give back stays, and WebKit says so.
+          const every = (o) => o === "<all_urls>" || o === "*://*/*";
+          const required = new Set([...(manifest.host_permissions || []), ...(manifest.permissions || []),
+            ...(manifest.content_scripts || []).flatMap((c) => c.matches || [])]);
+          const always = [...required].some(every);
+          const optional = [...(manifest.optional_host_permissions || []), ...(manifest.optional_permissions || [])];
+          const ours = !always && optional.some(every) && origins.some(every);
+          const rest = ours ? origins.filter((o) => !every(o)) : origins;
+          const done = theirs.length || rest.length ? await remove({ permissions: theirs, origins: rest }) : true;
+          if (done && ours) await native("permissions.removeWebsites", []);
           return done;
         }));
       }
@@ -3401,8 +3738,11 @@ enum ExtensionShims {
           if (!s || !Array.isArray(s.js)) return s;
           const world = String(s.world || "").toUpperCase();
           const before = world === "MAIN" ? ["search-passkeys.js"]
-            : updating && !world ? ["search-passkeys.js", "search-shim.js"] : ["search-shim.js"];
-          return { ...s, js: [...before.filter((file) => !s.js.includes(file)), ...s.js] };
+            : updating && !world ? ["search-passkeys.js", "search-shim-content.js"] : ["search-shim-content.js"];
+          // An older Search's whole shim, named by a registration it kept,
+          // gives way to the content script's part of it.
+          const js = s.js.filter((file) => file !== "search-shim.js");
+          return { ...s, js: [...before.filter((file) => !js.includes(file)), ...js] };
         }) : scripts;
         for (const name of ["registerContentScripts", "updateContentScripts"]) {
           const original = scripting[name];
@@ -3518,21 +3858,26 @@ enum ExtensionShims {
         }
       }
 
-      // WebKit says "install" again when an extension is taken up afresh in
-      // the same session — after a Reload, or a worker brought back — where
-      // Chrome says "update"; extensions open their welcome page on
-      // "install". The first one of a session is marked, and any later one
-      // told as the update it is.
+      // WebKit says "install" for any load of the same version once the
+      // browser has been up five seconds: a relaunch with many extensions,
+      // a Reload, a worker brought back. Extensions open their welcome page
+      // on "install", and did on every launch. Search says what it is (see
+      // Extensions.installReason): an install once, an update for one taken
+      // up again in this run, and otherwise nothing — Chrome tells a worker
+      // nothing of the browser starting but onStartup.
       if (background && runtime.onInstalled && typeof runtime.onInstalled.addListener === "function") {
         let decided = null;
-        const seenBefore = () => decided || (decided = native("background.loadedBefore", []).then((v) => !!v, () => false));
+        const reason = () => decided || (decided = native("background.installReason", []).then((v) => v == null ? null : String(v), () => "install"));
         const add = runtime.onInstalled.addListener.bind(runtime.onInstalled);
         const remove = runtime.onInstalled.removeListener.bind(runtime.onInstalled);
         const wrapped = new Map();
         put(runtime.onInstalled, "addListener", (listener) => {
           const w = (details) => {
             if (!details || details.reason !== "install") return listener(details);
-            seenBefore().then((seen) => listener(seen ? { ...details, reason: "update", previousVersion: runtime.getManifest().version } : details));
+            reason().then((r) => {
+              if (r === "install") listener(details);
+              else if (r === "update") listener({ ...details, reason: "update", previousVersion: runtime.getManifest().version });
+            });
           };
           wrapped.set(listener, w);
           return add(w);
@@ -4533,8 +4878,9 @@ enum ExtensionShims {
                 throw Unsupported(what: "No page to download through")
             }
             if let name = spec["filename"] as? String, !name.isEmpty {
-                // A name it asks for, which may carry folders: only the last part is kept.
-                browser.namedDownloads[url] = (name as NSString).lastPathComponent
+                // A name it asks for, which may carry folders: as in Chrome,
+                // they are made inside Downloads (Browser.downloadPath).
+                browser.namedDownloads[url] = name
             }
             ExtensionShims.askedDownloads[url] = id
             let download = await web.startDownload(using: URLRequest(url: url))
@@ -4812,10 +5158,10 @@ enum ExtensionShims {
             }
             owner.revive(id, because: "its worker wouldn't start")
             return nil
-        // Whether this extension was loaded before in this run of the
-        // browser — an "install" then is really a restart (see the shim).
-        case "background.loadedBefore":
-            return owner.loadedBefore.contains(id)
+        // What WebKit's "install" really is (see Extensions.installReason):
+        // "install", "update", or nothing to tell.
+        case "background.installReason":
+            return owner.installReason(id) ?? NSNull()
         // A page found the worker gone though WebKit believes it runs (see
         // the shim's ping).
         case "background.revive":
@@ -4959,7 +5305,7 @@ enum ExtensionShims {
             let detail = missing.isEmpty ? "Until you remove the extension." : missing.map(\.rawValue).sorted().joined(separator: ", ")
             guard await owner.ask(question, detail: detail, context: context) else { return false }
             for permission in missing { context.setPermissionStatus(.grantedExplicitly, for: permission) }
-            for pattern in unreached { context.setPermissionStatus(.grantedExplicitly, for: pattern) }
+            for pattern in unreached { Extensions.grant(pattern, in: context) }
             Extensions.fence(context)
             return true
         case "permissions.removeWebsites":
@@ -4967,10 +5313,18 @@ enum ExtensionShims {
             // <all_urls> itself: both, and exactly those, so a host the
             // manifest names stays. Taken out of the granted list as it is:
             // WebKit's own "unknown" leaves *://*/* granted beside a named
-            // host (AllURLsRemovalTests).
+            // host (AllURLsRemovalTests), and its permissions.remove takes
+            // the named hosts too.
+            //
+            // Taken out of the list, WebKit leaves the content scripts it
+            // put in for every website, and the extension went on running
+            // everywhere (#705): built again from what is left.
             let everything: Set<String> = ["<all_urls>", "*://*/*"]
-            context.grantedPermissionMatchPatterns = context.grantedPermissionMatchPatterns
-                .filter { !everything.contains($0.key.string) }
+            let held = context.grantedPermissionMatchPatterns
+            let left = held.filter { !everything.contains($0.key.string) }
+            guard left.count != held.count else { return true }
+            context.grantedPermissionMatchPatterns = left
+            Extensions.rebuildScripts(context)
             return true
         case "permissions.remove":
             let gone = Set((first as? [String]) ?? [])
