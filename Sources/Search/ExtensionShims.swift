@@ -1307,6 +1307,10 @@ enum ExtensionShims {
           }
         } catch (e) {}
       }
+      // While a worker's importScripts runs, WebKit turns the run loop to
+      // fetch the file: timers fire, and events are handed over, before the
+      // listeners in that file are in (see `hold`).
+      let importing = 0;
       if (worker && typeof root.importScripts === "function") {
         const shipped = new Set(), empty = new Set();
         for (const p of __SEARCH_SCRIPTS__) p.startsWith("-") ? empty.add(p.slice(1)) : shipped.add(p);
@@ -1322,7 +1326,9 @@ enum ExtensionShims {
             }
             wanted.push(u);
           }
-          if (wanted.length) return load(...wanted);
+          if (!wanted.length) return;
+          importing++;
+          try { return load(...wanted); } finally { importing--; }
         };
       }
       // The tab an extension's framed page is in, asked once (see __searchToFrame).
@@ -1334,12 +1340,24 @@ enum ExtensionShims {
       // Pathfinder — has them found this way instead. A framed page says it
       // is there as it starts, and that it is going as it goes.
       const framedPages = new Map();
-      let ownFrame = null;
+      let ownFrame = null, sharedWrites = Promise.resolve();
       if (embedded && runtime && typeof Object.getPrototypeOf(runtime).sendMessage === "function") {
         const say = (here) => Promise.resolve(Object.getPrototypeOf(runtime).sendMessage.call(runtime, { __searchFramed: here }));
         ownFrame = say(true).then((r) => r && typeof r.tabId === "number" && typeof r.frameId === "number" ? r : null, () => null);
         try { root.addEventListener("pagehide", () => { say(false).catch(() => {}); }); } catch (e) {}
       }
+      // Whether a framed page's tab is private, asked of the browser (WebKit
+      // takes privacy from a window, which here holds both kinds: see
+      // `privacy` below). Not known counts as private.
+      const inPrivateTab = async (tab) => {
+        if (!tab || typeof tab.id !== "number") return true;
+        // Asked by place every time: "this extension sees no private tab"
+        // would also be the answer for a private tab it isn't let into.
+        try {
+          const answers = await native("tabs.private", [[placeOf(tab, await frames())]]);
+          return !Array.isArray(answers) || answers[0] !== false;
+        } catch (e) { return true; }
+      };
       // Who has something to say about a message, told between the
       // extension's worker and its own pages on a channel they share (one
       // origin): each says, as soon as its listeners have run, whether it
@@ -1358,7 +1376,13 @@ enum ExtensionShims {
       // WebKit doesn't bring every message to every page. Not waited for
       // until they say something about one they heard.
       const deaf = new Set();
-      const keyOf = (message) => { try { const k = JSON.stringify(message); return k && k.length < 4000 ? k : null; } catch (e) { return null; } };
+      // WebKit's JSON transport may reorder object members; a structured
+      // clone over BroadcastChannel keeps their insertion order. Both must
+      // name the same message, including inside arrays and nested objects.
+      const messageJSON = (message) => JSON.stringify(message, (_, value) =>
+        value && typeof value === "object" && !Array.isArray(value)
+          ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
+      const keyOf = (message) => { try { const k = messageJSON(message); return k && k.length < 4000 ? k : null; } catch (e) { return null; } };
       const tell = (message, verdict, heard) => {
         const key = channel && keyOf(message);
         if (key) channel.postMessage({ key, from: background ? "worker" : me, verdict, heard, at: Date.now() });
@@ -1373,7 +1397,7 @@ enum ExtensionShims {
       // alike, is never taken for one, and an unpaired copy is forgotten
       // after a few seconds (Security).
       const relayKey = (message) => {
-        try { const text = JSON.stringify(message); return text === undefined ? null : text; } catch (e) { return null; }
+        try { const text = messageJSON(message); return text === undefined ? null : text; } catch (e) { return null; }
       };
       const ownPlace = (() => { try { return runtime.getURL(""); } catch (e) { return ""; } })();
       const fromOwnPages = (sender) => !!sender && sender.id === runtime.id && typeof sender.url === "string" && !!ownPlace
@@ -1414,17 +1438,98 @@ enum ExtensionShims {
         setTimeout(ask, 100);
       };
       let deliverRelayed = null, relaying = false;
-      const relay = (message) => { if (channel && !inContent) try { channel.postMessage({ relay: message, from: me, url: location.href }); } catch (e) {} };
+      const relayReplies = new Map();
+      let relaySequence = 0;
+      const relay = (message) => {
+        if (!channel || inContent) return null;
+        const id = me + ":" + (++relaySequence);
+        const key = relayKey(message);
+        let finish, timer = null, held = false, settled = false, expected = null;
+        const emptyFrom = new Set();
+        const answer = new Promise((resolve) => { finish = resolve; });
+        // An empty reply is not an answer: another page may still be holding
+        // the real one. Once every page this copy was sent to has replied
+        // empty, there is nothing left to wait for. The countdown is only
+        // for a page that never replies at all.
+        const settle = (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          timer = null;
+          relayReplies.delete(id);
+          finish(value);
+        };
+        const countDown = () => { if (!settled && !timer) timer = setTimeout(() => settle(undefined), 10000); };
+        const everyEmpty = () => expected && [...expected].every((peer) => emptyFrom.has(peer));
+        relayReplies.set(id, {
+          key,
+          held: () => { held = true; clearTimeout(timer); timer = null; },
+          reply: (value, from) => {
+            if (value !== undefined) settle(value);
+            else {
+              if (from) emptyFrom.add(from);
+              if (everyEmpty()) settle(undefined);
+              else countDown();
+            }
+          },
+          alone: () => { if (!held) settle(undefined); },
+        });
+        countDown();
+        Promise.resolve().then(() => {
+          expected = new Set(peers);
+          if (expected.size === 0 || everyEmpty()) settle(undefined);
+        });
+        try {
+          const value = JSON.parse(JSON.stringify(message));
+          channel.postMessage({ relay: value, from: me, url: location.href, replyTo: id });
+        } catch (e) { settle(undefined); }
+        return { answer, cancel: () => settle(undefined), alone: () => { if (!held) settle(undefined); } };
+      };
+      const firstReply = (original, relayed) => {
+        if (!relayed) return original;
+        return new Promise((resolve, reject) => {
+          let left = 2, failure, done = false;
+          const win = (value) => { if (!done) { done = true; resolve(value); } };
+          const none = () => { if (--left === 0) failure ? reject(failure) : win(undefined); };
+          original.then((value) => {
+            if (value !== undefined) win(value);
+            // No other page joined, and the worker had nothing to say.
+            // Main returns at once; the relay has nobody left to ask.
+            else if (peers.size === 0) { relayed.alone(); win(undefined); }
+            else none();
+          }, (error) => { failure = error; none(); });
+          relayed.answer.then((value) => value !== undefined ? win(value) : none());
+        }).finally(relayed.cancel);
+      };
       if (channel) {
         channel.onmessage = ({ data }) => {
           if (!data || data.from === me) return;
+          if (data.replyTo && data.to === me) {
+            const pending = relayReplies.get(data.replyTo);
+            if (pending) data.held ? pending.held() : pending.reply(data.value, data.from);
+            return;
+          }
           if (data.relay !== undefined) {
             const key = relayKey(data.relay);
             if (!background && deliverRelayed) setTimeout(() => {
               if (key && pending(heardNatively, key)) { count(heardNatively, key, -1); return; }
               if (key) count(heardRelayed, key, 1);
+              let replied = false;
+              const respond = (value) => {
+                replied = true;
+                if (!data.replyTo) return;
+                // runtime messaging carries JSON, even though this channel
+                // can clone more. Preserve the native API's value types.
+                try { value = value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
+                catch (e) { value = undefined; }
+                channel.postMessage({ replyTo: data.replyTo, to: data.from, from: me, value });
+              };
               relaying = true;
-              try { deliverRelayed(data.relay, { id: runtime.id, url: data.url, origin: location.origin }); } finally { relaying = false; }
+              try {
+                const kept = deliverRelayed(data.relay, { id: runtime.id, url: data.url, origin: location.origin }, respond);
+                if (!replied && kept === true && data.replyTo) channel.postMessage({ replyTo: data.replyTo, to: data.from, from: me, held: true });
+                else if (!replied && kept !== true) respond(undefined);
+              } finally { relaying = false; }
             }, 50);
             return;
           }
@@ -1473,6 +1578,136 @@ enum ExtensionShims {
         delete plain.tab;
         return plain;
       };
+      // An extension's blob: URLs cannot be fetched from its content world
+      // in WebKit. Keep the Blob where it was made; only this extension's
+      // authenticated runtime messages may read it. Nothing is published to
+      // a website, another extension, or the native network stack.
+      const blobURLs = new Map(), blobReads = new Map();
+      const blobReaderPrefix = (root.crypto?.randomUUID?.() || me) + ":";
+      let blobReaderSequence = 0;
+      const releaseBlob = (key) => {
+        const entry = blobReads.get(key);
+        if (entry) clearTimeout(entry.timer);
+        blobReads.delete(key);
+      };
+      const touchBlob = (key, entry) => {
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => releaseBlob(key), 120000);
+      };
+      const blobBase = "blob:" + runtime.getURL("");
+      // Attached only after this page creates a blob, and not joined to the
+      // message channel: a listener on every extension page is someone the
+      // worker waits on for every message.
+      let noteBlob = () => {};
+      const blobChunkSize = 192 * 1024;
+      const blobEncode = (bytes) => {
+        let text = "";
+        for (let i = 0; i < bytes.length; i += 8192) text += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        return btoa(text);
+      };
+      if (!inContent && typeof URL?.createObjectURL === "function") {
+        const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+        put(URL, "createObjectURL", function (value) {
+          const url = create.apply(this, arguments);
+          if (value instanceof Blob && url.startsWith(blobBase)) { blobURLs.set(url, value); noteBlob(); }
+          return url;
+        });
+        put(URL, "revokeObjectURL", function (url) {
+          blobURLs.delete(String(url));
+          return revoke.apply(this, arguments);
+        });
+      }
+      const readBlob = async (request) => {
+        if (request.open) {
+          const blob = blobURLs.get(request.open);
+          if (!blob) return null;
+          if (blobReads.size >= 64) return { error: "Too many open blob readers" };
+          const key = blobReaderPrefix + (++blobReaderSequence);
+          const entry = { blob, timer: null };
+          blobReads.set(key, entry);
+          touchBlob(key, entry);
+          return { key, size: blob.size, type: blob.type };
+        }
+        const entry = blobReads.get(request.key);
+        if (!entry) return typeof request.key === "string" && request.key.startsWith(blobReaderPrefix)
+          ? request.close ? { closed: true } : { error: "Blob reader expired" } : null;
+        if (request.close) { releaseBlob(request.key); return { closed: true }; }
+        const offset = request.offset;
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > entry.blob.size) return { error: "Invalid blob offset" };
+        touchBlob(request.key, entry);
+        const bytes = new Uint8Array(await entry.blob.slice(offset, offset + blobChunkSize).arrayBuffer());
+        const end = offset + bytes.length === entry.blob.size;
+        if (end) releaseBlob(request.key);
+        return { chunk: blobEncode(bytes), end };
+      };
+      if (typeof root.fetch === "function" && typeof root.ReadableStream === "function") {
+        const original = root.fetch;
+        const send = Object.getPrototypeOf(runtime).sendMessage;
+        const ask = (request, signal) => new Promise((resolve, reject) => {
+          let timer, settled = false;
+          const finish = (error, value) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", abort);
+            error ? reject(error) : resolve(value);
+          };
+          const abort = () => finish(new DOMException("The operation was aborted.", "AbortError"));
+          if (signal?.aborted) return abort();
+          signal?.addEventListener("abort", abort, { once: true });
+          timer = setTimeout(() => finish(new TypeError("Blob owner did not respond")), 10000);
+          Promise.resolve(send.call(runtime, { __searchBlob: request })).then(
+            (reply) => {
+              if (settled && request.open && reply?.key) ask({ key: reply.key, close: true }).catch(() => {});
+              if (reply && !reply.error) finish(null, reply);
+              else finish(new TypeError(reply?.error || "Blob URL is unavailable"));
+            },
+            (error) => finish(error));
+        });
+        put(root, "fetch", function (input, init) {
+          let url;
+          try { url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url; } catch (e) {}
+          if (typeof url !== "string" || !url.startsWith(blobBase)) return original.apply(this, arguments);
+          const objectURL = url.split("#", 1)[0];
+          if (blobURLs.has(objectURL)) return original.apply(this, arguments);
+          let request;
+          try { request = new Request(input, init); } catch (e) { return Promise.reject(e); }
+          if (request.method !== "GET" || request.mode !== "cors" || request.integrity || request.headers.has("Range")) return original.apply(this, arguments);
+          return (async () => {
+            const signal = request.signal;
+            const opened = await ask({ open: objectURL }, signal);
+            let done = false, offset = 0, controller;
+            const close = () => {
+              if (done) return;
+              done = true;
+              signal.removeEventListener("abort", abort);
+              ask({ key: opened.key, close: true }).catch(() => {});
+            };
+            const abort = () => { close(); controller?.error(new DOMException("The operation was aborted.", "AbortError")); };
+            const stream = new ReadableStream({
+              start(value) { controller = value; },
+              async pull(value) {
+                if (done) return;
+                try {
+                  const reply = await ask({ key: opened.key, offset }, signal);
+                  if (done) return;
+                  const text = atob(reply.chunk), bytes = new Uint8Array(text.length);
+                  for (let i = 0; i < text.length; ++i) bytes[i] = text.charCodeAt(i);
+                  offset += bytes.length;
+                  if (bytes.length) value.enqueue(bytes);
+                  if (reply.end) { close(); value.close(); }
+                } catch (error) { if (!done) { close(); value.error(error); } }
+              },
+              cancel() { close(); },
+            }, { highWaterMark: 0 });
+            signal.addEventListener("abort", abort, { once: true });
+            if (signal.aborted) abort();
+            const response = new Response(stream, { statusText: "OK", headers: { "Content-Type": opened.type, "Content-Length": String(opened.size) } });
+            Object.defineProperty(response, "url", { value: objectURL });
+            return response;
+          })();
+        });
+      }
       const gather = (event, told) => {
         if (!event || typeof event.addListener !== "function") return;
         const add = event.addListener.bind(event);
@@ -1492,6 +1727,37 @@ enum ExtensionShims {
             else frames.set(sender.frameId, Date.now());
             if (frames.size) framedPages.set(tab, frames); else framedPages.delete(tab);
           }
+          // A framed page's localStorage (see sharedKey): the copy its other
+          // pages share, as it opens, and its batches of changes after,
+          // which the worker writes one at a time, and only when they change
+          // something. A page in a private tab takes no part: it keeps its
+          // own, as before.
+          if (internalMessages && !local && message && message.__searchFramedStorage && sender && sender.id === runtime.id) {
+            if (!background) { setTimeout(() => respond(undefined), 10000); return true; }
+            const { by, ops, read } = message.__searchFramedStorage;
+            if (!fromOwnPages(sender) || (!read && !Array.isArray(ops))) { respond(false); return; }
+            inPrivateTab(sender.tab).then((shy) => {
+              if (shy) return read ? { private: true } : false;
+              if (read) return readShared().then((kept) => ({ values: (kept && kept.values) || {} }));
+              const write = sharedWrites.then(async () => {
+                const kept = await readShared();
+                const values = Object.assign(Object.create(null), (kept && kept.values) || {});
+                let changed = false;
+                for (const op of ops) {
+                  if (op && op.clear) { for (const key of Object.keys(values)) { delete values[key]; changed = true; } }
+                  else if (op && typeof op.key === "string") {
+                    if (typeof op.value === "string") { if (values[op.key] !== op.value) { values[op.key] = op.value; changed = true; } }
+                    else if (op.key in values) { delete values[op.key]; changed = true; }
+                  }
+                }
+                if (changed) await sharedArea.set({ [sharedKey]: { by: String(by), values } });
+                return true;
+              });
+              sharedWrites = write.catch(() => {});
+              return write;
+            }).then(respond, () => respond(false));
+            return true;
+          }
           if (internalMessages && !local && message && typeof message.__searchFramed === "boolean" && sender && sender.id === runtime.id) {
             if (!background) { setTimeout(() => respond(undefined), 10000); return true; }
             respond(sender.tab && typeof sender.frameId === "number" ? { tabId: sender.tab.id, frameId: sender.frameId } : null);
@@ -1510,6 +1776,13 @@ enum ExtensionShims {
           if (!local && message && message.__searchOffscreenRelay === true && sender.id === runtime.id) {
             native("offscreen.sendMessage", [message.token, message.message, sender])
               .then(sendResponse, (error) => sendResponse({ relayError: String(error) }));
+            return true;
+          }
+          if (message && message.__searchBlob) {
+            if (!internalMessages || inContent || sender?.id !== runtime.id) return;
+            readBlob(message.__searchBlob).then((reply) => { if (reply) sendResponse(reply); },
+              () => sendResponse({ error: "Could not read blob" }));
+            // Non-owners stay silent; an empty answer would beat the owner.
             return true;
           }
           // Only the worker answers; any other page stays out of it.
@@ -1588,6 +1861,9 @@ enum ExtensionShims {
               .then((value) => sendResponse({ value }), (e) => sendResponse({ error: String(e && e.message || e) }));
             return true;
           }
+          // A page that only serves its own blobs must not answer, or hold,
+          // any other message. That would put it in the set the worker waits on.
+          if (servingBlobs && listeners.size === 0 && !background && !relayHost) return;
           sender = untabbed(sender);
           for (const listener of [...listeners]) {
             let result;
@@ -1675,13 +1951,13 @@ enum ExtensionShims {
         }
         put(event, "addListener", (listener) => {
           listeners.add(listener);
-          if (told) { join(); deliverRelayed = (m, s) => dispatch(m, s, () => {}); }
+          if (told) { join(); deliverRelayed = (m, s, respond) => dispatch(m, s, respond || (() => {})); }
           if (!attached) { attached = true; add(dispatch); }
         });
         put(event, "removeListener", (listener) => {
           listeners.delete(listener);
           if (told && listeners.size === 0 && !relayHost) leave();
-          if (attached && listeners.size === 0 && !(internalMessages && (background || relayHost))) {
+          if (attached && listeners.size === 0 && !(internalMessages && (background || relayHost || servingBlobs))) {
             attached = false; remove(dispatch);
           }
         });
@@ -1690,6 +1966,14 @@ enum ExtensionShims {
         // A worker may only add listeners while it starts; one that adds its
         // first later would be refused. So in a worker the one listener is
         // WebKit's from the start.
+        let servingBlobs = false;
+        if (internalMessages) noteBlob = () => {
+          if (inContent || background || relayHost) return;
+          servingBlobs = true;
+          if (attached) return;
+          attached = true;
+          add(dispatch);
+        };
         if (background || relayHost) { attached = true; add(dispatch); if (told) join(); }
       };
       if (runtime) {
@@ -1722,6 +2006,72 @@ enum ExtensionShims {
             });
           } catch (e) {}
         }
+      }
+      // Where framed pages share their localStorage (see below, at
+      // `embedded && sharedArea`): the extension's session storage, which
+      // WebKit keeps to its own pages and worker, away from its content
+      // scripts in a website's process (unless the extension itself opens
+      // it to them with setAccessLevel, which WebKit won't let the shim
+      // cover); gone when Search quits, until a page writes again. Hidden
+      // from the extension too, so this comes before content scripts return.
+      const sharedKey = "__searchFramedLocalStorage";
+      const sharedArea = chrome.storage && chrome.storage.session;
+      // The copy itself, for the worker only (see `__searchFramedStorage`).
+      let readShared = async () => undefined;
+      if (sharedArea && typeof sharedArea.get === "function") {
+        const get = sharedArea.get.bind(sharedArea);
+        readShared = () => Promise.resolve(get(sharedKey)).then((all) => all ? all[sharedKey] : undefined);
+        const answer = (p, callback) => {
+          if (typeof callback !== "function") return p;
+          p.then(callback, (error) => withLastError(error, callback));
+        };
+        put(sharedArea, "get", (keys, callback) => {
+          if (typeof keys === "function") { callback = keys; keys = null; }
+          return answer(Promise.resolve(get(keys === undefined ? null : keys)).then((all) => {
+            if (all && typeof all === "object" && sharedKey in all) { all = { ...all }; delete all[sharedKey]; }
+            return all;
+          }), callback);
+        });
+        if (typeof sharedArea.getKeys === "function") {
+          const getKeys = sharedArea.getKeys.bind(sharedArea);
+          put(sharedArea, "getKeys", (callback) => answer(Promise.resolve(getKeys())
+            .then((keys) => Array.isArray(keys) ? keys.filter((key) => key !== sharedKey) : keys), callback));
+        }
+        if (typeof sharedArea.getBytesInUse === "function") {
+          const bytes = sharedArea.getBytesInUse.bind(sharedArea);
+          put(sharedArea, "getBytesInUse", (keys, callback) => {
+            if (typeof keys === "function") { callback = keys; keys = null; }
+            if (keys === null || keys === undefined) {
+              return answer(Promise.all([bytes(null), bytes(sharedKey)]).then(([all, hidden]) => Math.max(0, (all || 0) - (hidden || 0))), callback);
+            }
+            const asked = (Array.isArray(keys) ? keys : [keys]).filter((key) => key !== sharedKey);
+            return answer(asked.length ? Promise.resolve(bytes(asked)) : Promise.resolve(0), callback);
+          });
+        }
+        const hide = (ev, withArea) => {
+          if (!ev || typeof ev.addListener !== "function") return;
+          const add = ev.addListener.bind(ev), remove = ev.removeListener.bind(ev), has = ev.hasListener.bind(ev);
+          const wrapped = new WeakMap();
+          put(ev, "addListener", (listener) => {
+            if (typeof listener !== "function") return add(listener);
+            let w = wrapped.get(listener);
+            if (!w) {
+              w = (changes, area) => {
+                if (changes && sharedKey in changes && (!withArea || area === "session")) {
+                  changes = { ...changes }; delete changes[sharedKey];
+                  if (!Object.keys(changes).length) return;
+                }
+                return listener(changes, area);
+              };
+              wrapped.set(listener, w);
+            }
+            return add(w);
+          });
+          put(ev, "removeListener", (listener) => remove(wrapped.get(listener) || listener));
+          put(ev, "hasListener", (listener) => has(wrapped.get(listener) || listener));
+        };
+        hide(chrome.storage.onChanged, true);
+        hide(sharedArea.onChanged, false);
       }
       // Installed before the content-script return. Each passive subscription
       // is bound natively to the background that this port connected to. A
@@ -2104,9 +2454,9 @@ enum ExtensionShims {
           // Never heard back by the one that sends it, so said for it.
           if (!inContent) tell(typeof args[0] === "string" && args.length > 1 && typeof args[1] !== "function" ? args[1] : args[0], "passes");
           checkWorker();
-          const answer = send(...args).then((r) => { if (r !== undefined) heard = Date.now(); return r; });
-          if (typeof args[0] !== "string" && !(args[0] && Object.keys(args[0]).some((k) => k.startsWith("__search")))) relay(args[0]);
-          return replied(answer, callback, "The message port closed before a response was received.");
+          const original = send(...args).then((r) => { if (r !== undefined) heard = Date.now(); return r; });
+          const relayed = typeof args[0] !== "string" && !(args[0] && Object.keys(args[0]).some((k) => k.startsWith("__search"))) ? relay(args[0]) : null;
+          return replied(firstReply(original, relayed), callback, "The message port closed before a response was received.");
         });
       }
       // A message for a tab reaches only its content scripts in WebKit. In
@@ -2892,6 +3242,107 @@ enum ExtensionShims {
         const set = store.set.bind(store);
         put(store, "set", (items, ...rest) => set(items && typeof items === "object" && Object.getPrototypeOf(items) !== Object.prototype ? Object.assign({}, items) : items, ...rest));
       }
+      // One localStorage for the extension's pages framed in websites, as
+      // Chrome keeps: WebKit keeps a framed page's storage per website, so
+      // Affinity Pathfinder, which keeps its sign-in there, was signed in on
+      // one company's site and signed out on every other. What such a page
+      // writes is kept in the extension's session storage too (sharedKey,
+      // written by the worker, hidden from the extension), in batches: a
+      // quarter of a second after the first change at most, and as the page
+      // goes. A framed page takes that copy from the worker as it opens —
+      // and opens again if it had already read something older — and hears
+      // every change after, with the storage event Chrome would fire. A page
+      // in a private tab, or one the worker doesn't answer, keeps its own.
+      if (embedded && sharedArea && runtime && root.localStorage && root.Storage) {
+        const ls = root.localStorage, proto = Storage.prototype;
+        const real = { get: proto.getItem, set: proto.setItem, remove: proto.removeItem, clear: proto.clear };
+        const send = (message) => Promise.resolve(Object.getPrototypeOf(runtime).sendMessage.call(runtime, message));
+        const writer = Math.random().toString(36).slice(2);
+        const readEarly = new Set(), mine = new Map();
+        const own = (o, key) => Object.prototype.hasOwnProperty.call(o, key);
+        let ready = false, off = false, queued = [], counted = [], timer = null;
+        const flush = () => {
+          clearTimeout(timer); timer = null;
+          if (!ready || off || !queued.length) return;
+          const ops = queued, keys = counted;
+          queued = []; counted = [];
+          const settle = () => { for (const key of keys) { const n = mine.get(key) - 1; if (n > 0) mine.set(key, n); else mine.delete(key); } };
+          send({ __searchFramedStorage: { by: writer, ops } }).then(settle, settle);
+        };
+        const share = (op) => {
+          if (off) return;
+          if (op.clear) queued = [op];
+          else {
+            queued = queued.filter((o) => o.key !== op.key); queued.push(op);
+            mine.set(op.key, (mine.get(op.key) || 0) + 1); counted.push(op.key);
+          }
+          if (ready && !timer) timer = setTimeout(flush, 250);
+        };
+        try { root.addEventListener("pagehide", flush); } catch (e) {}
+        proto.getItem = function (key) { if (this === ls && !ready) readEarly.add(String(key)); return real.get.apply(this, arguments); };
+        proto.setItem = function (key, value) {
+          const result = real.set.apply(this, arguments);
+          if (this === ls) share({ key: String(key), value: String(value) });
+          return result;
+        };
+        proto.removeItem = function (key) {
+          const result = real.remove.apply(this, arguments);
+          if (this === ls) share({ key: String(key), value: null });
+          return result;
+        };
+        proto.clear = function () {
+          const result = real.clear.apply(this, arguments);
+          if (this === ls) share({ clear: true });
+          return result;
+        };
+        // Into this website's copy, as another page of the extension changed
+        // it: a storage event for each key that differs.
+        const take = (values, before) => {
+          const changed = [];
+          for (const key of Object.keys(before || {})) {
+            if (!own(values, key) && !mine.has(key) && real.get.call(ls, key) !== null) {
+              const old = real.get.call(ls, key); real.remove.call(ls, key); changed.push([key, old, null]);
+            }
+          }
+          for (const [key, value] of Object.entries(values)) {
+            if (mine.has(key) || typeof value !== "string") continue;
+            const old = real.get.call(ls, key);
+            if (old !== value) { real.set.call(ls, key, value); changed.push([key, old, value]); }
+          }
+          return changed;
+        };
+        const keepOwn = () => { off = true; queued = []; counted = []; mine.clear(); };
+        send({ __searchFramedStorage: { read: true } }).then((answer) => {
+          if (!answer || answer.private || !answer.values) { keepOwn(); return; }
+          const changed = take(answer.values, null);
+          ready = true;
+          // The page already read one of them as it was here: it opens again,
+          // with the extension's — once, should that keep happening.
+          if (changed.some(([key]) => readEarly.has(key))) {
+            let last = 0;
+            try { last = Number(sessionStorage.getItem("__searchFramedReload")) || 0; } catch (e) {}
+            if (Date.now() - last > 10000) {
+              try { sessionStorage.setItem("__searchFramedReload", String(Date.now())); } catch (e) {}
+              location.reload();
+              return;
+            }
+          }
+          flush();
+        }, keepOwn);
+        if (chrome.storage.onChanged) {
+          Object.getPrototypeOf(chrome.storage.onChanged).addListener.call(chrome.storage.onChanged, (changes, area) => {
+            const change = area === "session" && changes && changes[sharedKey];
+            if (!change || !ready || off) return;
+            // The copy gone (the extension cleared its session storage) is
+            // not every key removed: this page keeps what it has.
+            const now = change.newValue, before = change.oldValue || { values: {} };
+            if (!now || now.by === writer) return;
+            for (const [key, old, value] of take(now.values || {}, before.values || {})) {
+              try { root.dispatchEvent(new StorageEvent("storage", { key, oldValue: old, newValue: value, url: location.href, storageArea: ls })); } catch (e) {}
+            }
+          });
+        }
+      }
       fill("scripting", {
         ExecutionWorld: { ISOLATED: "ISOLATED", MAIN: "MAIN", USER_SCRIPT: "USER_SCRIPT" },
         StyleOrigin: { AUTHOR: "AUTHOR", USER: "USER" },
@@ -2981,6 +3432,86 @@ enum ExtensionShims {
         return !!(c && typeof c.regexFilter === "string" && c.requestDomains !== undefined
           && (type === "redirect" || type === "modifyHeaders"));
       };
+      // WebKit's patterns lack some of what Chrome's (RE2's) have: `\d`,
+      // `\w` and counts are refused, measured on 27.2 with isRegexSupported.
+      // Each is written out the long way, as the same pattern: `\d` as
+      // `[0-9]`, `\w` as `[A-Za-z0-9_]` (in a class, its members), `x{3,}`
+      // as `xxx+`. Chrome takes all three, and WebKit refused each such rule
+      // outright. A count on a
+      // group is written out only where no substitution reads the groups by
+      // number, which copies of the group would renumber; a count over 16
+      // is left as it was.
+      const widen = (re, numbered) => {
+        let out = "", i = 0, inClass = false, last = null, lastGroup = false, hyphen = false;
+        const opens = [];
+        while (i < re.length) {
+          const ch = re[i];
+          if (ch === "\\" && i + 1 < re.length) {
+            const n = re[i + 1];
+            const sub = n === "d" ? (inClass ? "0-9" : "[0-9]") : n === "w" ? (inClass ? "A-Za-z0-9_" : "[A-Za-z0-9_]") : "\\" + n;
+            if (!inClass) { last = out.length; lastGroup = false; }
+            out += sub; i += 2;
+            // `[\w-%]`: the hyphen after a class escape is a hyphen, but
+            // after its members written out it would make a range. It goes
+            // last in the class, where it is a hyphen again.
+            if (inClass && sub !== "\\" + n && re[i] === "-" && re[i + 1] !== "]") { hyphen = true; i++; }
+            continue;
+          }
+          if (inClass) {
+            if (ch === "]") { if (hyphen) out += "-"; hyphen = false; inClass = false; }
+            out += ch; i++; continue;
+          }
+          if (ch === "[") {
+            last = out.length; lastGroup = false; inClass = true; out += ch; i++;
+            if (re[i] === "^") { out += "^"; i++; }
+            if (re[i] === "]") { out += "]"; i++; }
+            continue;
+          }
+          if (ch === "(") { opens.push(out.length); out += ch; i++; last = null; continue; }
+          if (ch === ")") { const start = opens.pop(); out += ch; i++; last = start === undefined ? null : start; lastGroup = true; continue; }
+          if (ch === "{") {
+            const m = /^\{(\d+)(,(\d*))?\}/.exec(re.slice(i));
+            const least = m ? Number(m[1]) : 0;
+            const most = !m ? 0 : m[2] === undefined ? least : m[3] === "" ? Infinity : Number(m[3]);
+            if (m && last !== null && !(lastGroup && numbered) && least <= 16 && most >= least && (most === Infinity || most - least <= 16)) {
+              const atom = out.slice(last);
+              out = out.slice(0, last) + (most === Infinity
+                ? (least ? atom.repeat(least - 1) + atom + "+" : atom + "*")
+                : atom.repeat(least) + (atom + "?").repeat(most - least));
+              i += m[0].length; last = null; continue;
+            }
+            out += ch; i++; last = null; continue;
+          }
+          if ("|^$*+?".includes(ch)) last = null; else { last = out.length; lastGroup = false; }
+          out += ch; i++;
+        }
+        return out;
+      };
+      // `\.site\.com\/rest` becomes `^[^:\/?#]+:\/\/[^\/?#]*\.site\.com\/rest`:
+      // the same text, now only where it ends the address's host. Only for a
+      // pattern that opens on a site it lists (bare, after `\.` or after
+      // `\/`), with no sites excluded beside it and no substitution whose
+      // groups would be renumbered. Rules against one site's own scripts
+      // are often of this shape.
+      const pinToSite = (r) => {
+        const c = r.condition, redirect = r.action && r.action.redirect;
+        if (!Array.isArray(c.requestDomains) || c.excludedRequestDomains || (redirect && redirect.regexSubstitution)) return null;
+        const re = c.regexFilter;
+        // An alternative (`a|b`) would sit outside the prefix and match
+        // anywhere once the list is let go: such a rule stays left out.
+        if (re.includes("|")) return null;
+        for (const site of c.requestDomains) {
+          if (typeof site !== "string" || !site) continue;
+          const name = site.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\/";
+          const host = re.startsWith("\\." + name) ? "[^\\/?#]*\\."
+            : re.startsWith("\\/" + name) ? ""
+            : re.startsWith(name) ? "([^\\/?#]*\\.)?" : null;
+          if (host === null) continue;
+          const { requestDomains, ...rest } = c;
+          return { ...r, condition: { ...rest, regexFilter: "^[^:\\/?#]+:\\/\\/" + host + (re.startsWith(name) ? re : re.slice(2)) } };
+        }
+        return null;
+      };
       const mendRule = (rule) => {
         if (!rule || typeof rule !== "object") return rule;
         const r = { ...rule, action: rule.action && { ...rule.action }, condition: rule.condition && { ...rule.condition } };
@@ -2994,14 +3525,32 @@ enum ExtensionShims {
           if (!c.resourceTypes.length) return null;
         }
         if (c && Array.isArray(c.excludedResourceTypes)) c.excludedResourceTypes = c.excludedResourceTypes.filter((t) => !unknownTypes.has(t));
+        // An empty list of sites to leave out leaves out none, in Chrome. To
+        // the retry below it read as a rule for all but some, so a block
+        // rule with `excludedInitiatorDomains: []` was left out with that
+        // kind.
+        if (c) for (const key of ["excludedRequestDomains", "excludedInitiatorDomains", "excludedDomains"]) {
+          if (Array.isArray(c[key]) && !c[key].length) delete c[key];
+        }
+        if (c && typeof c.regexFilter === "string") c.regexFilter = widen(c.regexFilter, !!(redirect && redirect.regexSubstitution));
         // A pattern beside a list of sites: WebKit drops the list and takes
         // the rule for every address its pattern matches (see
-        // misreadByWebKit in ExtensionShims.swift). A redirect or a header
-        // change of that shape is left out rather than carried out
-        // everywhere: uBlock Origin Lite's strict blocking, `^https?://.*`
-        // for thousands of named sites, sent every page to its warning (#709).
-        // So is a rule on a response's headers, which WebKit has no word for
-        // and would carry out on every request it otherwise matches.
+        // misreadByWebKit in ExtensionShims.swift). Where the pattern opens
+        // on one of the sites it lists — `\.site\.com\/…` — it is pinned to
+        // that site as the address's host, and the list let go: the rule
+        // then acts on no more than it named, if on a little less. A pinned
+        // rule WebKit would still misread (one on a response's headers) is
+        // left out below like any other.
+        if (misread(r)) {
+          const pinned = pinToSite(r);
+          if (pinned && !misread(pinned)) return pinned;
+        }
+        // Otherwise a redirect or a header change of that shape is left out
+        // rather than carried out everywhere: uBlock Origin Lite's strict
+        // blocking, `^https?://.*` for thousands of named sites, sent every
+        // page to its warning (#709). So is a rule on a response's headers,
+        // which WebKit has no word for and would carry out on every request
+        // it otherwise matches.
         if (misread(r)) {
           try { native("debug.error", ["declarativeNetRequest: " + (r.action && r.action.type) + " rule " + r.id + " left out — WebKit would carry it out beyond what it names"]).catch(() => {}); } catch (x) {}
           return null;
@@ -3011,6 +3560,8 @@ enum ExtensionShims {
       if (dnr && typeof dnr.isRegexSupported === "function") {
         const original = dnr.isRegexSupported.bind(dnr);
         put(dnr, "isRegexSupported", (options, callback) => {
+          // Asked of the pattern as a rule would carry it (see `widen`).
+          if (options && typeof options.regex === "string") options = { ...options, regex: widen(options.regex, false) };
           const p = Promise.resolve(original(options)).then((r) => r || { isSupported: false, reason: "syntaxError" },
             () => ({ isSupported: false, reason: "syntaxError" }));
           if (typeof callback !== "function") return p;
@@ -3320,9 +3871,43 @@ enum ExtensionShims {
           const contexts = [...new Set(props.contexts.map((c) => c === "browser_action" || c === "page_action" ? "action" : c).filter((c) => c !== "launcher"))];
           return { ...props, contexts: contexts.length ? contexts : ["page"] };
         };
+        // A link pattern WebKit can't read (uBlock Origin's "abp:*", for
+        // its subscribe links) fails the whole call, where Chrome takes it;
+        // uBlock Origin then stopped making its menu at that entry. The
+        // entry is made with the patterns WebKit reads, or not at all when
+        // none are left: with none, it would show on every link.
+        const readable = (made, props, callback) => {
+          for (;;) {
+            try { return made(props, callback); } catch (e) {
+              const text = String(e && e.message || e);
+              const bad = /'([^']*)' is not a valid pattern/.exec(text), key = /'(targetUrlPatterns|documentUrlPatterns)'/.exec(text);
+              const list = bad && key && props && props[key[1]];
+              if (!Array.isArray(list) || !list.includes(bad[1])) throw e;
+              const left = list.filter((u) => u !== bad[1]);
+              if (!left.length) { if (typeof callback === "function") setTimeout(callback); return props.id; }
+              props = { ...props, [key[1]]: left };
+            }
+          }
+        };
         const create = menus.create.bind(menus), update = menus.update.bind(menus);
-        put(menus, "create", (props, callback) => create(mend(props), callback));
-        put(menus, "update", (id, props, callback) => update(id, mend(props), callback));
+        put(menus, "create", (props, callback) => readable(create, mend(props), callback));
+        put(menus, "update", (id, props, callback) => readable((p, cb) => update(id, p, cb), mend(props), callback));
+      }
+
+      // alarms.create with a callback last, as Chrome has taken since 111:
+      // WebKit reads the callback as the alarm's details and refuses the
+      // call, so the alarm was never set. uBlock Origin passes one to every
+      // call, and none of its timers (saving its filters, updating its
+      // lists) ever fired (#1208).
+      if (chrome.alarms && typeof chrome.alarms.create === "function") {
+        const alarms = chrome.alarms, create = alarms.create.bind(alarms);
+        put(alarms, "create", (...args) => {
+          const callback = args.length && typeof args[args.length - 1] === "function" ? args.pop() : null;
+          if (!callback) return create(...args);
+          let made;
+          try { made = Promise.resolve(create(...args)); } catch (e) { made = Promise.reject(e); }
+          made.then(() => callback(), (e) => withLastError(e, callback));
+        });
       }
 
       // webRequest listeners with options WebKit doesn't take — blocking
@@ -3865,25 +4450,51 @@ enum ExtensionShims {
       // Extensions.installReason): an install once, an update for one taken
       // up again in this run, and otherwise nothing — Chrome tells a worker
       // nothing of the browser starting but onStartup.
+      //
+      // WebKit may also tell a fresh install as a browser start: onStartup,
+      // and no onInstalled at all. It did for the first extension installed
+      // in each launch, and an extension that sets itself up only on
+      // "install" was never set up. So the worker asks as it starts, and a
+      // fresh install hears "install" once, whatever WebKit sent or in
+      // whichever order, and no "startup", as in Chrome.
+      //
+      // And either event may come while the worker is still importing the
+      // file that listens for it (see `importing`): a worker that adds its
+      // listeners in a file it imports found the event had come and gone.
+      // So the shim listens from the start and holds each event until no
+      // import is running; the worker's listeners hear it then.
       if (background && runtime.onInstalled && typeof runtime.onInstalled.addListener === "function") {
-        let decided = null;
-        const reason = () => decided || (decided = native("background.installReason", []).then((v) => v == null ? null : String(v), () => "install"));
-        const add = runtime.onInstalled.addListener.bind(runtime.onInstalled);
-        const remove = runtime.onInstalled.removeListener.bind(runtime.onInstalled);
-        const wrapped = new Map();
-        put(runtime.onInstalled, "addListener", (listener) => {
-          const w = (details) => {
-            if (!details || details.reason !== "install") return listener(details);
-            reason().then((r) => {
-              if (r === "install") listener(details);
-              else if (r === "update") listener({ ...details, reason: "update", previousVersion: runtime.getManifest().version });
-            });
+        const hold = (event, decide) => {
+          const listeners = [], queue = [];
+          let timer = null;
+          const flush = () => {
+            timer = null;
+            if (importing) { timer = setTimeout(flush, 5); return; }
+            for (const args of queue.splice(0)) {
+              for (const f of [...listeners]) { try { f(...args); } catch (e) { setTimeout(() => { throw e; }); } }
+            }
           };
-          wrapped.set(listener, w);
-          return add(w);
+          const tell = (args) => { queue.push(args); if (!timer) timer = setTimeout(flush); };
+          try { event.addListener((...args) => { Promise.resolve(decide(...args)).then((out) => { if (out) tell(out); }); }); } catch (e) {}
+          put(event, "addListener", (f) => { if (typeof f === "function" && !listeners.includes(f)) listeners.push(f); });
+          put(event, "removeListener", (f) => { const i = listeners.indexOf(f); if (i >= 0) listeners.splice(i, 1); });
+          put(event, "hasListener", (f) => listeners.includes(f));
+          put(event, "hasListeners", () => listeners.length > 0);
+          return tell;
+        };
+        // Asked once per worker life; undefined when the question failed.
+        const asked = native("background.installReason", []).then((v) => v == null ? null : String(v), () => undefined);
+        let toldInstall = false;
+        const install = () => { if (toldInstall) return null; toldInstall = true; return [{ reason: "install" }]; };
+        const installed = hold(runtime.onInstalled, (details) => {
+          if (!details || details.reason !== "install") return [details];
+          return asked.then((r) => r === "install" || r === undefined ? install()
+            : r === "update" ? [{ ...details, reason: "update", previousVersion: runtime.getManifest().version }] : null);
         });
-        put(runtime.onInstalled, "removeListener", (listener) => { const w = wrapped.get(listener); wrapped.delete(listener); return remove(w || listener); });
-        put(runtime.onInstalled, "hasListener", (listener) => wrapped.has(listener));
+        asked.then((r) => { const out = r === "install" && install(); if (out) installed(out); });
+        if (runtime.onStartup && typeof runtime.onStartup.addListener === "function") {
+          hold(runtime.onStartup, (...args) => asked.then((r) => r === "install" ? null : args));
+        }
       }
 
       // A worker may add listeners only while it starts; WebKit throws for
@@ -5283,8 +5894,13 @@ enum ExtensionShims {
             let named = found.requestedPermissions.union(found.optionalPermissions)
             // Sites as the manifest names them, optional ones included —
             // which allRequestedMatchPatterns leaves out.
-            let places = Set(found.allRequestedMatchPatterns.union(found.optionalPermissionMatchPatterns).map(\.string))
-            guard wanted.allSatisfy(named.contains), origins.allSatisfy({ places.contains($0.string) }) else {
+            let places = found.allRequestedMatchPatterns.union(found.optionalPermissionMatchPatterns)
+            // A manifest wildcard permits asking for an individual site, not
+            // just the literal pattern. Match in that direction only, as
+            // WebKit does for permissions.request, with host paths ignored.
+            guard wanted.allSatisfy(named.contains), origins.allSatisfy({ origin in
+                places.contains { $0.matches(origin, options: .ignorePaths) }
+            }) else {
                 throw Unsupported(what: "Only permissions specified in the manifest may be requested.")
             }
             let missing = wanted.filter { context.permissionStatus(for: $0) != .grantedExplicitly }
@@ -5355,7 +5971,9 @@ enum ExtensionShims {
             guard let places = first as? [Any] else {
                 return Browsers.all.contains { $0.tabs.contains { $0.shy && owner.seen($0, for: context) } }
             }
-            return places.map { located($0, context: context, owner: owner)?.shy == true }
+            // A place that finds no tab says so (null), for a caller that
+            // has to count "not known" as private (see inPrivateTab).
+            return places.map { place -> Any in located(place, context: context, owner: owner).map { $0.shy } ?? NSNull() }
         case "tabs.move", "tabs.discard", "tabs.activate":
             guard let tab = located(first, context: context, owner: owner), let browser = owner.browser(of: tab) else { throw Unsupported(what: "No tab there") }
             let visible = owner.visibleTabs(of: browser, for: context)

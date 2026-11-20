@@ -129,8 +129,8 @@ struct SearchApp: App {
                         ))
                     }
                 }
-                // Moved here from Settings, as Safari has it. WebKit reads it
-                // once, so it counts from the next page on.
+                // Moved here from Settings, as Safari has it: every page,
+                // open or to come (Preferences.switchWebKit).
                 Menu("Spelling and Grammar") {
                     Toggle("Correct Spelling Automatically", isOn: Binding(
                         get: { browser.prefs.autocorrect },
@@ -238,7 +238,7 @@ struct SearchApp: App {
                     .shortcut("view.zoomIn")
                 Button("Zoom Out") { browser.zoom(by: 1 / 1.1) }
                     .shortcut("view.zoomOut")
-                Button("Actual Size") { browser.resetZoom() }
+                Button(browser.prefs.actualSizeTitle) { browser.resetZoom() }
                     .shortcut("view.actualSize")
                 Divider()
                 // The Web Inspector, on the keys Chrome and Arc use (see Inspector.swift).
@@ -248,6 +248,14 @@ struct SearchApp: App {
                     .shortcut("view.console")
                 Button("Inspect Element") { browser.inspectElement() }
                     .shortcut("view.inspect")
+                // The system's own item, which replacing the toolbar group
+                // above took with it: ⌃⌘F did nothing (#1176). The key is
+                // the Mac's, never offered in Settings › Shortcuts.
+                Divider()
+                Button(browser.fullScreen ? "Exit Full Screen" : "Enter Full Screen") {
+                    (NSApp.keyWindow ?? browser.window)?.toggleFullScreen(nil)
+                }
+                .keyboardShortcut("f", modifiers: [.control, .command])
             }
             CommandMenu("Tabs") {
                 Button("Back") { browser.back() }
@@ -326,6 +334,14 @@ struct SearchApp: App {
                 Button("Duplicate Tab") { browser.duplicate() }
                     .shortcut("tabs.duplicate")
                     .disabled(!(browser.active?.isWeb ?? false))
+                // Only with small windows turned on in Settings › General:
+                // someone who never asked for them never sees them.
+                if browser.prefs.littleLinks {
+                    Button("Open in Small Window") {
+                        if let tab = browser.active { browser.openInLittleWindow(tab) }
+                    }
+                        .disabled(!(browser.active.map(browser.liftable) ?? false))
+                }
                 Button("Copy Address") { browser.copyAddress() }
                     .shortcut("tabs.copyAddress")
                     .disabled(!(browser.active?.isWeb ?? false))
@@ -1258,8 +1274,8 @@ struct ContentView: View {
             }
             // Every window has a monitor, and every monitor hears every key:
             // each takes only its own window's, and the one in front takes
-            // those of windows that aren't a browser's (a panel, the little
-            // window).
+            // those of windows that aren't a browser's (a panel). A small
+            // window's are its own (LittleWindow.watchKeys).
             // The address field raised from another app answers its own keys
             // (Launcher.swift): taken here, Escape would put away what is up
             // in the window behind it, ⌘W close a tab there, and a key typed
@@ -1431,7 +1447,7 @@ struct ContentView: View {
     /// one press so the field can have it. Put back on the next turn, after
     /// this event has been delivered: restoring before then would let the
     /// menu run the command in the same breath.
-    private func silenceCaretEquivalents() -> [(NSMenuItem, String, NSEvent.ModifierFlags)] {
+    static func silenceCaretEquivalents() -> [(NSMenuItem, String, NSEvent.ModifierFlags)] {
         guard let main = NSApp.mainMenu else { return [] }
         let arrows = Set([
             NSLeftArrowFunctionKey, NSRightArrowFunctionKey, NSUpArrowFunctionKey, NSDownArrowFunctionKey,
@@ -1452,7 +1468,7 @@ struct ContentView: View {
         return stolen
     }
 
-    private func restoreCaretEquivalents(_ stolen: [(NSMenuItem, String, NSEvent.ModifierFlags)]) {
+    static func restoreCaretEquivalents(_ stolen: [(NSMenuItem, String, NSEvent.ModifierFlags)]) {
         for (item, key, mask) in stolen {
             item.keyEquivalent = key
             item.keyEquivalentModifierMask = mask
@@ -1490,8 +1506,10 @@ struct ContentView: View {
         // there is its Cancel: taken here, it closed the panel under it and
         // left the question up, with Return still on its first button.
         if event.window?.sheetParent != nil || NSApp.modalWindow != nil { return false }
-        // A small window's keys are its own (see Little.swift).
-        if let little = LittleWindow.owning(event.window) { return little.take(event) }
+        // A small window's keys are its own monitor's (LittleWindow.watchKeys),
+        // there with or without a browser window. Taken here too, ⌘[ was
+        // gone before the page had it.
+        if LittleWindow.owning(event.window) != nil { return false }
         // Nor the address field raised from another app's (Launcher.swift).
         if Launcher.owns(event.window) { return false }
         // A popup window: ⌘W closes it, not a tab of the
@@ -1544,6 +1562,25 @@ struct ContentView: View {
             }
             browser.tabSwitcher.cancel()
             if event.keyCode == 53 { return true }
+        }
+
+        // The accounts hanging from the sign-in box the caret is in: ↓ and ↑
+        // move through them, as in Safari and Chrome, and Return takes the
+        // one lit, as a click would (⇧Return: one of your card's rows into
+        // the box alone). Until an arrow lights one, Return is the page's and
+        // sends its form, and ↑ moves the caret as it always did.
+        // A word still being composed (Japanese, Chinese, Korean input) keeps
+        // ↓, ↑ and Return for its own candidates.
+        if browser.suggesting != nil, let page = event.window?.firstResponder as? PageView,
+           !((page as AnyObject as? NSTextInputClient)?.hasMarkedText() ?? false),
+           flags.intersection([.command, .option, .control]).isEmpty {
+            let shifted = flags.contains(.shift)
+            switch event.keyCode {
+            case 125 where !shifted: if browser.moveChoice(by: 1) { return true }
+            case 126 where !shifted: if browser.moveChoice(by: -1) { return true }
+            case 36, 76: if browser.takeLitChoice(alone: shifted) { return true }
+            default: break
+            }
         }
 
         // Escape puts the page back. On a blank tab there is no page to put
@@ -1722,9 +1759,9 @@ struct ContentView: View {
                 // this press and the event goes on to the field. A letter
                 // shortcut is not one of these and still runs.
                 if combo.movesCaret, caretIn(event) {
-                    let stolen = silenceCaretEquivalents()
+                    let stolen = ContentView.silenceCaretEquivalents()
                     if !stolen.isEmpty {
-                        DispatchQueue.main.async { [stolen] in self.restoreCaretEquivalents(stolen) }
+                        DispatchQueue.main.async { [stolen] in ContentView.restoreCaretEquivalents(stolen) }
                     }
                     return false
                 }

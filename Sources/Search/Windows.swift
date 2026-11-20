@@ -31,6 +31,9 @@ struct WindowRecord: Codable {
     /// the one on screen (see OneWindow.swift). Nil for a window of its own.
     var merge: UUID?
     var tucked: Bool?
+    /// Its column, or the strip across the top, folded away with ⌘S (see
+    /// Fold.swift). Nil, as in any line written before it was kept: shown.
+    var folded: Bool?
 
     init(space: UUID = Space.firstID) { self.space = space }
 
@@ -42,6 +45,7 @@ struct WindowRecord: Codable {
         rows = (try? values.decode([String: Session.Shape].self, forKey: .rows)) ?? [:]
         merge = try? values.decode(UUID.self, forKey: .merge)
         tucked = try? values.decode(Bool.self, forKey: .tucked)
+        folded = try? values.decode(Bool.self, forKey: .folded)
     }
 
     var rect: NSRect? { frame.map(NSRectFromString).flatMap { $0.width > 100 && $0.height > 100 ? $0 : nil } }
@@ -150,7 +154,10 @@ enum Browsers {
             show(kept)
             return
         }
-        let browser = Browser(record: WindowRecord(space: front?.spaceID ?? Space.firstID))
+        // Folded or not as the window it came from, as in Safari and Arc.
+        var fresh = WindowRecord(space: front?.spaceID ?? Space.firstID)
+        if front?.isPopup == false, front?.folded == true { fresh.folded = true }
+        let browser = Browser(record: fresh)
         open(browser, frame: nil)
     }
 
@@ -413,6 +420,12 @@ enum Browsers {
             if closed.count > 10 { closed.removeFirst(closed.count - 10) }
         }
         all.removeAll { $0 === browser }
+        // Its tabs in small windows (Open in Small Window) stay open: another
+        // window of the profile keeps them, and writes them down now.
+        if let heir = all.first(where: { $0.isOpen && !$0.isPopup && $0.profileID == browser.profileID }) {
+            LittleWindow.rehome(from: browser, to: heir)
+            heir.writeSession(now: true)
+        }
         if #available(macOS 15.4, *) { Extensions.shared.detach(browser) }
         browser.closeAll()
         ContentView.forget(browser)
@@ -475,6 +488,7 @@ enum Browsers {
         if rows { record.rows = browser.allRows(keeping: keeping) }
         record.merge = browser.mergeID
         record.tucked = browser.tucked ? true : nil
+        record.folded = browser.folded ? true : nil
         return record
     }
 
@@ -570,6 +584,7 @@ enum Browsers {
         // A visit or an icon from the last second or so, still waiting to be
         // written.
         Profiles.flushHistories()
+        Spaces.flushHistories()
         Favicons.shared.flush()
     }
 

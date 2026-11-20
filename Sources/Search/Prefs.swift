@@ -1,5 +1,6 @@
 import Security
 import SwiftUI
+import WebKit
 
 // Everything there is to set, in one observable place.
 //
@@ -325,6 +326,10 @@ final class Preferences: ObservableObject {
     @Published var sleepsTabs: Bool {
         didSet { store.set(sleepsTabs, forKey: "tabs.sleep") }
     }
+    /// A resting tab's title and icon fade until you go to it. Off unless chosen.
+    @Published var dimsSleepingTabs: Bool {
+        didSet { store.set(dimsSleepingTabs, forKey: "tabs.sleep.dim") }
+    }
     /// Tabs you haven't pinned, named or grouped close once left alone this
     /// long, as in Arc. Never unless asked for.
     @Published var tabLife: TabLife {
@@ -419,6 +424,11 @@ final class Preferences: ObservableObject {
     }
     @Published var showsReading: Bool {
         didSet { store.set(showsReading, forKey: "tabs.reading") }
+    }
+    /// Tab titles in full ink (black or white) instead of the soft greys
+    /// used for tabs that aren't the one you're on. Off unless asked for.
+    @Published var highContrastText: Bool {
+        didSet { store.set(highContrastText, forKey: "tabs.highContrast") }
     }
     /// The tab you're on says where its page is, at rest, without a click:
     /// its site, from the address on screen (see AtRest.swift). On unless
@@ -515,12 +525,19 @@ final class Preferences: ObservableObject {
     @Published var autocorrect: Bool {
         didSet {
             store.set(autocorrect, forKey: "autocorrect")
-            Preferences.tellWebKit(autocorrect: autocorrect)
+            // Every page, open and to come: WebKit's one switch for them all.
+            Preferences.switchWebKit(autocorrect: autocorrect)
         }
     }
     /// How big every site is drawn until it has been zoomed on its own.
     @Published var pageZoom: Double {
         didSet { store.set(pageZoom, forKey: "pageZoom") }
+    }
+    /// View › Actual Size goes to that zoom, as in Safari; away from 100%
+    /// its title says where (#1210).
+    var actualSizeTitle: String {
+        let percent = Int((pageZoom * 100).rounded())
+        return percent == 100 ? "Actual Size" : "Actual Size (\(percent)%)"
     }
     /// The stops the setting steps through — every 5%, from as small as
     /// anyone reads to as big as a page is worth.
@@ -1028,6 +1045,7 @@ final class Preferences: ObservableObject {
         popupWindows = store.bool(forKey: "tabs.popupWindows")
         popupSites = Set(store.stringArray(forKey: "privacy.popupSites") ?? [])
         sleepsTabs = store.object(forKey: "tabs.sleep") as? Bool ?? true
+        dimsSleepingTabs = store.bool(forKey: "tabs.sleep.dim")
         tabLife = TabLife(rawValue: store.integer(forKey: "tabs.close.after")) ?? .never
         sleepPace = SleepPace.chosen
         lazyTabs = store.bool(forKey: "tabs.lazy")
@@ -1045,6 +1063,7 @@ final class Preferences: ObservableObject {
         siteNotifications = store.object(forKey: "notifications.ask") as? Bool ?? true
         showsTabShortcuts = store.bool(forKey: "tabs.shortcuts")
         showsReading = store.bool(forKey: "tabs.reading")
+        highContrastText = store.bool(forKey: "tabs.highContrast")
         // On for everyone who never touched it (Drice, 24 Oct 2026, on
         // Security's advice); a choice made before stands.
         showsAddress = store.object(forKey: "tabs.address") as? Bool ?? true
@@ -1301,6 +1320,34 @@ final class Preferences: ObservableObject {
     /// reading them and not us. Text replacement, smart quotes and smart
     /// dashes are Edit › Substitutions' (see Substitutions.swift).
     static func tellWebKit(autocorrect: Bool) {
-        UserDefaults.standard.set(autocorrect, forKey: "WebAutomaticSpellingCorrectionEnabled")
+        UserDefaults.standard.set(autocorrect, forKey: autocorrectKey)
+    }
+
+    static let autocorrectKey = "WebAutomaticSpellingCorrectionEnabled"
+
+    /// Once WebKit has read the default it keeps its own copy, for every
+    /// page of the app, and the only way to change it is its own toggle
+    /// (what Safari's menu sends): a flip, not a value. It used to be flipped
+    /// when the default disagreed with the choice, and that is what turned
+    /// autocorrect on when it was switched off (idea 743): the default can
+    /// change without WebKit reading it again — written by another Search
+    /// sharing the app's defaults, or with no page view to flip — and from
+    /// then on every flip went the wrong way while the menu's tick said
+    /// otherwise. So the guess goes: the default is cleared, WebKit flips
+    /// and writes back where it now stands, and flips once more if that
+    /// isn't `on`. Any page view will do, since the switch is the app's;
+    /// with none open, one made for the purpose and let go.
+    static func switchWebKit(autocorrect on: Bool) {
+        let defaults = UserDefaults.standard
+        let toggle = NSSelectorFromString("toggleAutomaticSpellingCorrection:")
+        let web: WKWebView = Web.pages.allObjects.first ?? WKWebView(frame: .zero)
+        if web.responds(to: toggle) {
+            defaults.removeObject(forKey: autocorrectKey)
+            web.perform(toggle, with: nil)
+            if let now = defaults.object(forKey: autocorrectKey) as? Bool, now != on {
+                web.perform(toggle, with: nil)
+            }
+        }
+        tellWebKit(autocorrect: on)
     }
 }

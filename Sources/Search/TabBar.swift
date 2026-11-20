@@ -28,6 +28,9 @@ struct TabBar: View {
     private var leading: CGFloat { browser.prefs.navigationLeft ? Metrics.helm - 8 + Metrics.tabGap : 0 }
     /// How wide the doors at the far end are, extension buttons included.
     @State private var doors: CGFloat = 0
+    /// The space whose run was last brought to its tab: another one is a
+    /// space coming in, not a tab picked (see reveal).
+    @State private var revealedSpace: UUID?
 
     var body: some View {
         // A GeometryReader is only here to measure the width. Its content is
@@ -133,19 +136,44 @@ struct TabBar: View {
                                 // would show over the lights and the doors.
                                 .scrollClipDisabled(carrying && !row.overflowing)
                                 .frame(width: row.run)
-                                .onAppear { reveal(reader, in: geo.size.width) }
+                                .onAppear {
+                                    revealedSpace = browser.spaceID
+                                    reveal(reader, in: geo.size.width)
+                                }
                                 .onChange(of: row.overflowing) { _, _ in reveal(reader, in: geo.size.width) }
-                                .onChange(of: browser.activeID) { _, _ in reveal(reader, in: geo.size.width, gliding: true) }
+                                // Another space's run comes in on its tab,
+                                // not gliding there from where the last was.
+                                .onChange(of: browser.activeID) { _, _ in
+                                    let arrived = revealedSpace != browser.spaceID
+                                    revealedSpace = browser.spaceID
+                                    reveal(reader, in: geo.size.width, gliding: !arrived)
+                                }
                             }
                                 .modifier(SwipeShift(offset: browser.spaceSwipeOffset))
                         }
-                        if browser.spaceSwipeSide > 0, spaceAt > 0 {
-                            page(spaceAt - 1, in: geo.size.width, pill: above)
-                                .modifier(SwipeShift(offset: browser.spaceSwipeOffset, by: -Metrics.strip))
+                        // Always there, out of sight above and below, the swipe
+                        // only moving them: put there as it set off, the bar
+                        // was made over, and the window worked out again where
+                        // it can be dragged by, past every tab — up to a tenth
+                        // of a second before the row moved. Drawn again only
+                        // for the space a slide brings from further along
+                        // (beside, Browser.mapDrawn).
+                        SwipeSided(side: browser.mapDrawn) { _ in
+                            if spaceAt > 0 {
+                                page(beside(spaceAt - 1, -1), in: geo.size.width, pill: above)
+                                    .modifier(SwipeShift(offset: browser.spaceSwipeOffset, by: -Metrics.strip))
+                                    .accessibilityHidden(true)
+                            }
+                            if spaceAt + 1 < browser.spaces.count {
+                                page(beside(spaceAt + 1, 1), in: geo.size.width, pill: below)
+                                    .modifier(SwipeShift(offset: browser.spaceSwipeOffset, by: Metrics.strip))
+                                    .accessibilityHidden(true)
+                            }
                         }
-                        if browser.spaceSwipeSide < 0, browser.drawsPage(after: spaceAt) {
-                            page(spaceAt + 1, in: geo.size.width, pill: below)
-                                .modifier(SwipeShift(offset: browser.spaceSwipeOffset, by: Metrics.strip))
+                        // The card for a new space, with its field, only while
+                        // the fingers bring it.
+                        if spaceAt + 1 >= browser.spaces.count, browser.drawsPage(after: spaceAt) {
+                            SwipeCard(side: browser.swipeSide, browser: browser, inline: true)
                         }
                     }
                     .frame(width: making ? min(540, row.room) : row.run, height: Metrics.strip, alignment: .leading)
@@ -227,6 +255,11 @@ struct TabBar: View {
                 }
             }
         }
+        // Another space's run comes in at once, not tab by tab (see SideBar).
+        .transaction(value: browser.spaceID) {
+            $0.animation = nil
+            $0.disablesAnimations = true
+        }
         .animation(Motion.quick, value: landing)
         .animation(Motion.glide, value: browser.activeID)
         // The row makes room for the field on the same spring as everything
@@ -239,6 +272,15 @@ struct TabBar: View {
     // MARK: - the spaces, one above the other
 
     private var making: Bool { browser.prefs.usesSpaces && browser.makingSpace }
+
+    /// The space drawn beside this one while it moves: the one lying
+    /// there, or while one slides in from further along, that one
+    /// (SideBar.beside).
+    private func beside(_ index: Int, _ side: Int) -> Int {
+        guard side == browser.spaceStep, let other = browser.spaceComing,
+              let at = browser.spaces.firstIndex(where: { $0.id == other }) else { return index }
+        return at
+    }
 
     /// Where the space on screen sits among them: one past the last while
     /// the row for a new one is up.
@@ -269,29 +311,37 @@ struct TabBar: View {
             let each = width(in: strip, tabs: shown, splits: row.splits)
             let line = TabBar.showsPinLine(shown, groups: groups.count)
             let firstLoose = shown.firstIndex { $0.pin == nil }
+            // Only the tabs there is room for, and a couple more: the rest
+            // run on past the window's edge. All of a long space's made,
+            // each swipe's start held the row still for up to a fifth of a
+            // second.
+            let fit = Set(shown.prefix(Int((strip / max(each + Metrics.tabGap, 1)).rounded(.up)) + 2).map(\.id))
+            let pinsShown = pins.filter { fit.contains($0.id) }
+            let groupsShown = groups.filter { $0.tabs.contains { fit.contains($0.id) } }
+            let looseShown = loose.filter { fit.contains($0.id) }
             HStack(spacing: Metrics.tabGap) {
                 if groupsOn {
-                    ForEach(pins) { tab in
+                    ForEach(pinsShown) { tab in
                         rowItem(tab, in: row.tabs, splits: row.splits, activeID: row.active,
                                 width: each, room: strip - lights - 12,
                                 height: Metrics.strip, interactive: false, pill: pill)
                     }
                     if line { PinLine() }
-                    ForEach(groups) { drawn in
+                    ForEach(groupsShown) { drawn in
                         GroupHeading(browser: browser, group: drawn.group, horizontal: true)
-                        ForEach(drawn.tabs) { tab in
+                        ForEach(drawn.tabs.filter { fit.contains($0.id) }) { tab in
                             rowItem(tab, in: row.tabs, splits: row.splits, activeID: row.active,
                                     width: each, room: strip - lights - 12,
                                     height: Metrics.strip, interactive: false, pill: pill)
                         }
                     }
-                    ForEach(loose) { tab in
+                    ForEach(looseShown) { tab in
                         rowItem(tab, in: row.tabs, splits: row.splits, activeID: row.active,
                                 width: each, room: strip - lights - 12,
                                 height: Metrics.strip, interactive: false, pill: pill)
                     }
                 } else {
-                    ForEach(Array(shown.enumerated()), id: \.element.id) { index, tab in
+                    ForEach(Array(shown.enumerated()).filter { fit.contains($0.element.id) }, id: \.element.id) { index, tab in
                         if line, index == firstLoose { PinLine() }
                         rowItem(tab, in: row.tabs, splits: row.splits, activeID: row.active,
                                 width: each, room: strip - lights - 12,
@@ -745,6 +795,7 @@ private struct TabPill: View, Equatable {
     /// the address on the tab you're on).
     private var rest: AtRest? { live && !editing ? AtRest.said(tab.restAddress, always: prefs.showsAddress) : nil }
     private var atRest: Bool { rest != nil }
+    private var dim: Bool { prefs.dimsSleepingTabs && tab.asleep && !live && !hovering }
 
     /// A pinned tab is a square, an edited one is a field, everything else is
     /// its share of what is left.
@@ -766,7 +817,8 @@ private struct TabPill: View, Equatable {
                         // letter or icon comes back once it is there.
                         Ring(size: 11)
                     } else if prefs.glyph == .icons, let icon = tab.icon {
-                        Mark(icon: icon, letter: tab.pin ?? "", size: 16, dim: tab.asleep)
+                        Mark(icon: icon, letter: tab.pin ?? "", size: 16, dim: tab.asleep,
+                             contrast: prefs.highContrastText)
                     } else {
                         Text(tab.pin ?? "")
                             .font(.system(size: 12, weight: .medium))
@@ -827,6 +879,7 @@ private struct TabPill: View, Equatable {
         .animation(nil, value: hovering)
         .animation(Motion.glide, value: editing)
         .animation(Motion.glide, value: tab.pin)
+        .animation(Motion.quick, value: dim)
         .onChange(of: refusals) { _, _ in
             guard editing else { return }
             shake = 0
@@ -852,7 +905,8 @@ private struct TabPill: View, Equatable {
                 } else if tab.loading {
                     Ring()
                 } else {
-                    Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 15, dim: tab.asleep)
+                    Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 15, dim: tab.asleep,
+                         contrast: prefs.highContrastText)
                         .overlay(alignment: .bottomTrailing) { AgentMark(tab: tab) }
                 }
             }
@@ -878,7 +932,8 @@ private struct TabPill: View, Equatable {
                     .frame(height: 16)
             } else {
                 if !tab.isBlank {
-                    Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 15)
+                    Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 15, dim: dim,
+                         contrast: prefs.highContrastText)
                         .overlay(alignment: .bottomTrailing) { AgentMark(tab: tab) }
                 }
                 if tab.bench, !tab.agent {
@@ -906,7 +961,7 @@ private struct TabPill: View, Equatable {
                 // The page is translated (Translate.swift).
                 TranslateSign(tab: tab, colour: colour)
                 TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
-                            size: 12.5, colour: colour, roomy: false)
+                            size: 12.5, colour: colour, roomy: false, dim: dim)
             }
 
             Spacer(minLength: 2)
@@ -1013,7 +1068,7 @@ private struct TabPill: View, Equatable {
     }
 
     private var colour: Color {
-        if live { return Palette.ink }
+        if live || prefs.highContrastText { return Palette.ink }
         return hovering ? Palette.ink.opacity(0.7) : greys.muted
     }
 }
@@ -1703,6 +1758,10 @@ struct TabMenu: View {
                         Button(other.windowName) { browser.moveToWindow(tab, other) }
                     }
                 }
+            }
+            if browser.prefs.littleLinks {
+                Button("Open in Small Window") { browser.openInLittleWindow(tab) }
+                    .disabled(!browser.liftable(tab))
             }
         }
         Divider()

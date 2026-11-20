@@ -73,6 +73,11 @@ final class Extensions: NSObject, ObservableObject {
     /// Errors an extension's pages and worker ran into, newest last, a few
     /// dozen at most per extension.
     @Published private(set) var errors: [String: [String]] = [:]
+    /// Why each extension that is switched on isn't running: WebKit's own
+    /// words from the last time it was taken up, until it next starts or
+    /// is switched off. Settings › Extensions shows it in place of a row
+    /// that looked like any other (#1208).
+    @Published private(set) var notStarted: [String: String] = [:]
 
     /// Something an extension's button or its row shows changed outside
     /// this file (where it runs, ExtensionSiteAccess.swift).
@@ -475,6 +480,20 @@ final class Extensions: NSObject, ObservableObject {
                 inTransit[id] = (key, oldOrders)
                 continue
             }
+            // Lifted into a small window (Little.swift): still a page, just
+            // not in the row. Told of as one with no window, the way a peek
+            // is, once the row has let it go.
+            if let little = LittleWindow.holding(id) {
+                if let adapter = adapters[id] {
+                    for context in contexts.values where context.openTabs.contains(adapter) {
+                        context.didCloseTab(adapter, windowIsClosing: false)
+                    }
+                }
+                adapters[id] = nil
+                watching[id] = nil
+                openedAside(little.tab)
+                continue
+            }
             if let adapter = adapters[id] {
                 for context in contexts.values where context.openTabs.contains(adapter) {
                     context.didCloseTab(adapter, windowIsClosing: false)
@@ -620,7 +639,10 @@ final class Extensions: NSObject, ObservableObject {
         // One installed from a folder before links were looked at.
         if item.source != nil {
             do { try await Task.detached(priority: .userInitiated) { try Extensions.unlinkOutside(folder) }.value }
-            catch { return false }
+            catch {
+                failed(item.id, ticket: ticket, because: error)
+                return false
+            }
         }
         let generation = ExtensionWorkerRecovery.shared.generation(for: item.id)
         try? await Task.detached(priority: .userInitiated) { try ExtensionShims.prepare(folder, workerGeneration: generation) }.value
@@ -675,6 +697,7 @@ final class Extensions: NSObject, ObservableObject {
             watch(context)
             if contexts[item.id] == nil, loadsThisRun.contains(item.id) { loadedBefore.insert(item.id); installing.remove(item.id) }
             loadsThisRun.insert(item.id)
+            notStarted[item.id] = nil
             contexts[item.id] = context
             openAside(in: context)
             // Keys you gave its commands in Settings › Shortcuts (#189).
@@ -683,13 +706,45 @@ final class Extensions: NSObject, ObservableObject {
             return true
         } catch {
             NSLog("Extensions: couldn't load %@: %@", item.id, error.localizedDescription)
+            failed(item.id, ticket: ticket, because: error)
             return false
         }
+    }
+
+    /// Kept for Settings, unless another load or a switch-off came since.
+    private func failed(_ id: String, ticket: Int, because error: Error) {
+        guard loadTickets[id] == ticket, installed.contains(where: { $0.id == id && $0.enabled }) else { return }
+        notStarted[id] = Extensions.reason(error)
+    }
+
+    /// What an extension that runs can't do here, though it asked to: an
+    /// extension that blocks requests with "webRequestBlocking" (uBlock
+    /// Origin's Manifest V2 build) starts, and its filters inside pages
+    /// work, but WebKit gives extensions no way to stop or change a request
+    /// that way, so not one request is blocked (#1208). Said in Settings and
+    /// at install rather than leaving a row that looked like any other.
+    static func cantDo(_ manifest: [String: Any]) -> String? {
+        let asked = (manifest["permissions"] as? [Any] ?? []).compactMap { $0 as? String }
+        // One that also has request rules blocks with those.
+        guard asked.contains("webRequestBlocking"), !asked.contains(where: { $0.hasPrefix("declarativeNetRequest") }) else { return nil }
+        let lite = (manifest["name"] as? String)?.hasPrefix("uBlock Origin") == true
+            ? " uBlock Origin Lite, from the Chrome Web Store, blocks them here." : ""
+        return "Can’t block requests: Safari’s engine doesn’t let extensions block them with webRequestBlocking. What it does inside pages still works." + lite
+    }
+
+    /// WebKit's error in a line: the manifest problem it names, where it
+    /// names one, rather than its general "couldn't be loaded".
+    static func reason(_ error: Error) -> String {
+        let error = error as NSError
+        let under = (error.userInfo[NSUnderlyingErrorKey] as? NSError)?.localizedDescription
+        let text = [error.localizedDescription, under].compactMap { $0 }.filter { !$0.isEmpty }
+        return text.isEmpty ? "unknown error" : text.joined(separator: " ")
     }
 
     @discardableResult
     private func unload(_ id: String, replacingContext: Bool = true) -> Bool {
         loadTickets[id, default: 0] += 1
+        notStarted[id] = nil
         guard let context = contexts[id] else { return false }
         var unloaded = false
         do { try controller.unload(context); unloaded = true } catch {}
@@ -901,7 +956,7 @@ final class Extensions: NSObject, ObservableObject {
                 save()
             }
             guard let item = installed.first(where: { $0.id == id }), item.enabled else { return }
-            browser?.announce(await load(item) ? "\(item.name) reloaded" : "\(item.name) couldn't start — see Settings › Extensions")
+            browser?.announce(await load(item) ? "\(item.name) reloaded" : "\(item.name) couldn't start" + (notStarted[id].map { ": \($0)" } ?? " — see Settings › Extensions"))
         }
     }
 
@@ -1068,9 +1123,10 @@ final class Extensions: NSObject, ObservableObject {
         guard installed.contains(where: { $0.id == id }) else { return }
         installing.insert(id)
         if await load(item) {
-            browser?.announce("\(name) is installed")
+            let limit = contexts[id].flatMap { Extensions.cantDo($0.webExtension.manifest) }
+            browser?.announce("\(name) is installed" + (limit.map { ", but \($0.prefix(1).lowercased() + $0.dropFirst())" } ?? ""))
         } else {
-            browser?.announce("\(name) is installed, but WebKit couldn't start it")
+            browser?.announce("\(name) is installed, but couldn't start" + (notStarted[id].map { ": \($0)" } ?? ""))
         }
     }
 
@@ -2346,7 +2402,7 @@ private struct ExtensionButtons: View {
                 // only if the flag is still its own.
                 .popover(isPresented: Binding(get: { extensions.menuOwner == key },
                                               set: { if !$0, extensions.menuOwner == key { extensions.menuOwner = nil } }),
-                         arrowEdge: edge) {
+                         hangingFrom: edge) {
                     ExtensionMenu(browser: browser, extensions: extensions)
                 }
             }
