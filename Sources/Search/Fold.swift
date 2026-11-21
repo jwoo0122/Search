@@ -335,8 +335,10 @@ struct Fold: View {
     /// window's buttons alone: the menu bar and the title bar macOS brings
     /// down with it.
     static let fullScreenCorner: CGFloat = 60
-    /// The band along the top that is the title bar over the page.
-    private static let top: CGFloat = 8
+    /// The band along the top that is the title bar over the page. At 8
+    /// it was hard to find with the pointer; 12 is still under a page's
+    /// own first line of anything to click.
+    private static let top: CGFloat = 12
     /// How long the pointer rests on the edge before a column folded for
     /// good comes out. Long enough to cross the edge, short enough not to be
     /// waited for.
@@ -408,7 +410,8 @@ struct Fold: View {
                     SideBar(browser: browser, prefs: prefs, onFrame: browser.asCards, onDrag: onDrag)
                         .frame(maxHeight: .infinity, alignment: .top)
                         .modifier(FoldShadow(x: onRight ? -4 : 4, behind: true,
-                                             strength: browser.folded && browser.peeking ? 1 : 0))
+                                             strength: browser.folded && browser.peeking ? 1 : 0,
+                                             ground: !browser.glassUnder))
                         // Faded rather than slid under Reduce Motion with
                         // Slide the column in and out on (Browser.moveColumn).
                         .animation(Motion.fadesColumn ? .easeInOut(duration: Motion.fade) : nil) { column in
@@ -812,11 +815,13 @@ private struct FoldShadow: ViewModifier {
     /// page until the slide was over.
     var behind = false
     var strength: Double = 1
+    /// Left out where the window's glass is to show through (see Glass.swift).
+    var ground = true
 
     func body(content: Content) -> some View {
         let color = Color.black.opacity(0.14 * strength)
         if behind {
-            content.background { Palette.ground.shadow(color: color, radius: 20, x: x, y: y) }
+            content.background { (ground ? Palette.ground : Color.clear).shadow(color: color, radius: 20, x: x, y: y) }
         } else {
             content.shadow(color: color, radius: 20, x: x, y: y)
         }

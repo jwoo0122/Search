@@ -479,6 +479,10 @@ final class Browser: NSObject, ObservableObject {
 
     var active: Tab? { tabs.first { $0.id == activeID } }
     var fieldShowing: Bool { editing || active?.isBlank ?? true }
+    /// The editing was started in the address line (AddressLine.swift), not
+    /// by ⌘L: the field is that line's, and its suggestions hang under it.
+    @Published var inlineEdit = false
+    var editingInline: Bool { editing && inlineEdit }
 
     /// What Return in the field will do, which the field says with its
     /// placeholder and a mark before the words: ⌘T, ⌘L and ⌘K raise one field
@@ -1857,14 +1861,22 @@ final class Browser: NSObject, ObservableObject {
     /// Settings clear it; a space for the history it keeps alone, as Safari
     /// clears one profile's, chosen in History's Clear… (see historyScopes).
     func clearHistory(in space: UUID? = nil) {
+        let all = Spaces.read(profile: profileID).map(\.id)
+        let forgotten: [UUID]
         if let space {
             Spaces.history(for: space).forget()
+            // The spaces that write to that history: it alone, or the ones signed in together.
+            forgotten = Spaces.ownsStore(space) ? [space] : all.filter { !Spaces.ownsStore($0) }
         } else {
+            forgotten = all
             // Everywhere you have been: the signed-out spaces' own histories too.
             for history in Spaces.histories(of: profileID) { history.forget() }
             // The tabs Search closed by itself are pages you have been to.
             archive.clear()
         }
+        // Where links went is a list of where you have been, too.
+        let choices = LinkChooser.cleared(prefs.linkChoices, spaces: Set(forgotten))
+        if choices != prefs.linkChoices { prefs.linkChoices = choices }
         // The sites' icons are a list of where you have been, too, and so
         // are the searches learned from sites visited (SiteSearch.swift).
         // Every space shares them, so they go whichever history does.
@@ -2865,6 +2877,8 @@ final class Browser: NSObject, ObservableObject {
             Updater.shared.checkIfDue { [weak self] line in self?.announce(line) }
             // With your other Macs, if that is on (see Sync.swift).
             Sync.shared.start()
+            // With iCloud, if that is on instead (see ICloudSync.swift).
+            ICloudSync.shared.start()
             // An icon that arrives is looked for again by every tab showing
             // that site, in every window, not only the one that asked for it:
             // each puts on its own page's, or its nearest neighbour's.
@@ -3522,7 +3536,8 @@ final class Browser: NSObject, ObservableObject {
         writeSession(now: true)
     }
 
-    /// Arc's sidebar brought over (see ImportArc.swift). Each of its spaces
+    /// Arc's sidebar brought over (see ImportArc.swift), or Zen's spaces read
+    /// into its shape (see ImportZen.swift). Each of its spaces
     /// becomes a space here — the one of the same name if there is one,
     /// signed in with the others when Arc's used its first profile — its
     /// pinned list the space's tabs, asleep until gone to, folders opened
@@ -3565,8 +3580,8 @@ final class Browser: NSObject, ObservableObject {
                 if let same = mine.first(where: { $0.name.localizedCaseInsensitiveCompare(arc.name) == .orderedSame }) {
                     targets.append((same.id, arc, profile))
                 } else {
-                    let space = Space(id: UUID(), name: arc.name, colour: 0, icon: arc.symbol, sharesSignIns: true,
-                                      profile: profile == Profile.personalID ? nil : profile)
+                    let space = Space(id: UUID(), name: arc.name, colour: arc.colour, icon: arc.symbol, sharesSignIns: true,
+                                      profile: profile == Profile.personalID ? nil : profile, gradient: arc.gradient)
                     all.append(space)
                     targets.append((space.id, arc, profile))
                     made += 1
@@ -3648,7 +3663,8 @@ final class Browser: NSObject, ObservableObject {
         return (made, pins, added)
     }
 
-    /// Another Chromium browser's open tabs (see ImportSession.swift), from
+    /// Another browser's open tabs (see ImportSession.swift, and
+    /// MozillaSession for Firefox and Zen), from
     /// the snapshot read when the sheet counted them, into this space: its
     /// pinned tabs as pins, the rest asleep at the end of the row, a grouped
     /// tab in the group of that name, made if missing and folded as it was.
@@ -5542,6 +5558,15 @@ final class Browser: NSObject, ObservableObject {
         writeSession(now: true)
     }
 
+    func setTabGroupColour(_ id: UUID, to colour: Int) {
+        guard Spaces.colours.indices.contains(colour),
+              let index = tabGroups.firstIndex(where: { $0.id == id }) else { return }
+        let choice: Int? = colour == 0 ? nil : colour
+        guard tabGroups[index].colour != choice else { return }
+        tabGroups[index].colour = choice
+        writeSession(now: true)
+    }
+
     /// Fold All Groups / Unfold All Groups, in the space's menu and the View
     /// menu, as in Arc: every group of the space on screen at once, each
     /// keeping its tabs and its place. A folded group still shows the tab in
@@ -7353,6 +7378,12 @@ final class Browser: NSObject, ObservableObject {
         visited.forEach(add)
         // A bookmark found only through a typo: under where you have been.
         kept.slips.forEach(add)
+        // Tabs open on your other devices (Sync with iCloud), as Safari
+        // shows iCloud Tabs: under your own places, a page here already
+        // being the same row.
+        for page in ICloudSync.shared.offers(for: typed) where seen.insert(History.identity(for: page.url)).inserted {
+            list.append(page)
+        }
         // Last in the list, and only when what was typed cannot be a place.
         if !typed.isEmpty, Address.url(from: typed) == nil {
             if let (keyword, rest) = Keyword.match(typed, in: prefs.keywords),
@@ -7384,7 +7415,7 @@ final class Browser: NSObject, ObservableObject {
         // would promise a place Return doesn't go to.
         // Towards where you have been first, as before bookmarks were here,
         // then towards a bookmark.
-        let places = list.filter { $0.kind != .open && !$0.kind.isCommand }
+        let places = list.filter { $0.kind != .open && $0.kind != .elsewhere && !$0.kind.isCommand }
         let ending = command != nil ? nil
             : history.completion(for: typed, among: places.filter { $0.kind != .bookmark } + places.filter { $0.kind == .bookmark })
         // Worked out from the addresses, before a search page's row is read
@@ -7554,6 +7585,7 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘L. The current address comes up selected, so typing over it replaces it
     /// and Escape puts it back.
     func edit() {
+        inlineEdit = false
         // Again while it is up over the page: put away, as Escape would.
         if editing, !summoning, !launching, active?.isBlank == false {
             putAway()
@@ -8176,7 +8208,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         let from = opener.id
         // The link menu's Open Link in New Tab, asked for in the last second.
         // Read once: reading it takes it.
+        // A window the page opens for a press of the middle button, as Google
+        // Drive's folders do, goes behind too, as a middle-clicked link's tab
+        // does and as Chrome puts it; ⇧ as well brings it forward (#1243).
         let behind = (webView as? PageView)?.takeBehind() == true
+            || (clicked && opener.popupGesture.middle && !action.modifierFlags.contains(.shift))
         // Its Open Link in Split View, the same way.
         let beside = (webView as? PageView)?.takeBeside() == true
         let popup = windowFeatures.width != nil || windowFeatures.height != nil
@@ -8188,6 +8224,13 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         if clicked, !beside, !popup, action.navigationType == .linkActivated,
            (action.request.httpMethod ?? "GET").uppercased() == "GET",
            let url = action.request.url, sendToSpace(url, from: opener) {
+            return nil
+        }
+        // The link menu's Open Link in New Tab or Split View on a small
+        // window's page: a tab in the space chosen for that window, as a
+        // ⌘-click's (see openClicked). Its other new windows are small
+        // windows, below.
+        if behind || beside, let url = action.request.url, sendToChosenSpace(url, from: opener) {
             return nil
         }
         // WebKit's copy of the opener's configuration still holds the
@@ -8239,10 +8282,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // tab in the browser's window, which came forward over it (#1041).
         // A window the page sizes still opens as Settings says below.
         if !behind, !beside, !(prefs.popupWindows && (windowFeatures.width != nil || windowFeatures.height != nil)),
-           LittleWindow.holding(opener.id) != nil {
+           let little = LittleWindow.holding(opener.id) {
             prepare(tab)
             if let url = action.request.url { tab.setAddressOptimistically(url) }
-            LittleWindow.show(tab, for: self)
+            // With the opener's sign-ins, so kept in the opener's space.
+            LittleWindow.show(tab, for: self, space: little.chosenSpace)
             return tab.web
         }
         if prefs.popupWindows, windowFeatures.width != nil || windowFeatures.height != nil {
@@ -8342,6 +8386,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         }
         // To a site Settings sends to another space: there, in front.
         if sendToSpace(url, from: source) { return }
+        // From a small window's page, to the space chosen for it.
+        if sendToChosenSpace(url, from: source) { return }
         open(url, foreground: foreground, from: source, mayWait: true, link: true)
     }
 

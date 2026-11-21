@@ -228,6 +228,13 @@ final class Preferences: ObservableObject {
     @Published var roomyTabs: Bool {
         didSet { store.set(roomyTabs, forKey: "sidebar.roomy") }
     }
+    /// The foot's doors — spaces, extensions, bookmarks, downloads — up in
+    /// the lights' row, right of back, forward and reload, and no foot.
+    /// Only where they fit; a column too narrow keeps them at the bottom.
+    /// Off unless asked for.
+    @Published var doorsUp: Bool {
+        didSet { store.set(doorsUp, forKey: "sidebar.doorsUp") }
+    }
     /// The column as icons only: each tab its site's mark, no titles, a
     /// fixed narrow width, and nothing that grows under the pointer (idea
     /// 413). Off unless asked for; Settings › Appearance › Tabs, Icons only.
@@ -272,6 +279,41 @@ final class Preferences: ObservableObject {
     /// it goes edge to edge there, as asked for on #607.
     @Published var cardsInFullScreen: Bool {
         didSet { store.set(cardsInFullScreen, forKey: "layout.cardsFullScreen") }
+    }
+    /// The page's address always in sight (see AddressLine.swift).
+    @Published var addressLine: Bool {
+        didSet { store.set(addressLine, forKey: "address.shown") }
+    }
+    /// How wide it is before the tabs across the top.
+    @Published var addressWidth: AddressWidth {
+        didSet { store.set(addressWidth.rawValue, forKey: "address.width") }
+    }
+    /// The ground the card and the column sit on as glass: what is behind
+    /// the window shows through, blurred (see Glass.swift). Off unless
+    /// turned on.
+    @Published var glass: Bool {
+        didSet { store.set(glass, forKey: "window.glass") }
+    }
+    /// How much grain lies over it, nought to one (GlassGround.mostGrain).
+    @Published var glassGrain: Double {
+        didSet { store.set(glassGrain, forKey: "window.glass.grain") }
+    }
+    /// How see-through the glass is: nought, as much of the space's colour
+    /// as glass takes (GlassGround.mostTint); one, the glass alone, frosted,
+    /// with no colour and no dimming over what shows through. The blur
+    /// itself is always there. Chosen in the space's Colour…
+    /// (SpaceLookPicker), or in Settings with spaces off.
+    @Published var glassClear: Double {
+        didSet { store.set(glassClear, forKey: "window.glass.clear") }
+    }
+    /// The tab you are on under a pane of Liquid Glass that glides from tab
+    /// to tab (see LiquidTab.swift). Off unless turned on; macOS 26 on.
+    @Published var liquidTabs: Bool {
+        didSet { store.set(liquidTabs, forKey: "tabs.liquid") }
+    }
+    /// Frosted, the Mac's blur since Big Sur, or Liquid Glass, from macOS 26.
+    @Published var glassStyle: GlassStyle {
+        didSet { store.set(glassStyle.rawValue, forKey: "window.glass.style") }
     }
     @Published var glyph: Glyph {
         didSet { store.set(glyph.rawValue, forKey: "glyph") }
@@ -708,6 +750,15 @@ final class Preferences: ObservableObject {
     @Published var spaceRoutes: [SpaceRoute] {
         didSet { store.set(spaceRoutes.map(\.plist), forKey: SpaceRoutes.rulesKey) }
     }
+    /// With links from other apps: ask which space each opens in, before it
+    /// loads (see LinkChooser.swift). Off unless asked for.
+    @Published var asksSpaceForLinks: Bool {
+        didSet { store.set(asksSpaceForLinks, forKey: "links.ask") }
+    }
+    /// Where each site went last, newest first, for that panel to pick first.
+    @Published var linkChoices: [LinkChooser.Choice] {
+        didSet { store.set(linkChoices.map(\.plist), forKey: "links.ask.last") }
+    }
     /// The downloads button always in the chrome, not only while something
     /// downloads (see Fetching.swift). Off unless asked for.
     @Published var alwaysShowsDownloads: Bool {
@@ -944,6 +995,12 @@ final class Preferences: ObservableObject {
     /// adds a command, so there is no switch. Still a property, for the
     /// code that asks and the tests that turn it off; never written.
     @Published var switcherKeys = true
+    /// The page in front offered to your iPhone, iPad and other Macs
+    /// through Handoff (see Handoff.swift). Off unless asked for: its
+    /// address leaves this Mac, if only for your own devices.
+    @Published var handoff: Bool {
+        didSet { store.set(handoff, forKey: "handoff") }
+    }
     /// "settings", "new tab" and the like, typed alone in the address field,
     /// reach that part of the app instead of asking a search engine for the
     /// word; part of one is offered (see AddressCommands.swift). Off unless
@@ -1026,6 +1083,7 @@ final class Preferences: ObservableObject {
         sideHides = store.bool(forKey: "sidebar.hides")
         slidesColumn = store.bool(forKey: Motion.slidesKey)
         roomyTabs = store.bool(forKey: "sidebar.roomy")
+        doorsUp = store.bool(forKey: "sidebar.doorsUp")
         sideIcons = store.bool(forKey: "sidebar.icons")
         foldsToIcons = store.bool(forKey: "sidebar.foldIcons")
         showsPlayer = store.bool(forKey: "sidebar.player")
@@ -1033,6 +1091,13 @@ final class Preferences: ObservableObject {
         sideWidth = min(Metrics.sideMax, max(Metrics.sideMin, CGFloat(width)))
         cards = store.object(forKey: "layout.cards") as? Bool ?? true
         cardsInFullScreen = store.bool(forKey: "layout.cardsFullScreen")
+        addressLine = store.bool(forKey: "address.shown")
+        addressWidth = store.string(forKey: "address.width").flatMap(AddressWidth.init) ?? .small
+        glass = store.bool(forKey: "window.glass")
+        glassGrain = (store.object(forKey: "window.glass.grain") as? Double).map { min(1, max(0, $0)) } ?? 0.2
+        glassClear = (store.object(forKey: "window.glass.clear") as? Double).map { min(1, max(0, $0)) } ?? 0.5
+        glassStyle = store.string(forKey: "window.glass.style").flatMap(GlassStyle.init) ?? .frosted
+        liquidTabs = store.bool(forKey: "tabs.liquid")
         glyph = store.string(forKey: "glyph").flatMap(Glyph.init) ?? .letters
         engine = store.string(forKey: "search.engine").flatMap(Engine.init) ?? .standard
         customEngine = store.string(forKey: "search.custom") ?? ""
@@ -1141,6 +1206,7 @@ final class Preferences: ObservableObject {
         aiProvider = store.string(forKey: "ai.provider").flatMap(AIProvider.init(rawValue:))
         aiModels = store.dictionary(forKey: "ai.models") as? [String: String] ?? [:]
         commandBar = store.bool(forKey: "commandbar")
+        handoff = store.bool(forKey: "handoff")
         floatingNewTab = store.bool(forKey: "newtab.floating")
         launcher = store.bool(forKey: "launcher.on")
         launcherLittle = store.bool(forKey: "launcher.little")
@@ -1180,6 +1246,8 @@ final class Preferences: ObservableObject {
         webmail = store.string(forKey: "mail.webmail").flatMap(Webmail.init(rawValue:)) ?? .none
         sendsLinksToSpaces = store.bool(forKey: SpaceRoutes.key)
         spaceRoutes = (store.array(forKey: SpaceRoutes.rulesKey) ?? []).compactMap(SpaceRoute.init(plist:))
+        asksSpaceForLinks = store.bool(forKey: "links.ask")
+        linkChoices = (store.array(forKey: "links.ask.last") ?? []).compactMap(LinkChooser.Choice.init(plist:))
         bookmarksBar = store.bool(forKey: "bookmarks.bar")
         alwaysShowsDownloads = store.bool(forKey: "downloads.button")
         downloadsOpening = store.string(forKey: "downloads.open").flatMap(DownloadsOpening.init(rawValue:)) ?? .tab
@@ -1276,6 +1344,7 @@ final class Preferences: ObservableObject {
         take(\.sideHides, store.bool(forKey: "sidebar.hides"))
         take(\.slidesColumn, store.bool(forKey: Motion.slidesKey))
         take(\.roomyTabs, store.bool(forKey: "sidebar.roomy"))
+        take(\.doorsUp, store.bool(forKey: "sidebar.doorsUp"))
         take(\.sideIcons, store.bool(forKey: "sidebar.icons"))
         take(\.foldsToIcons, store.bool(forKey: "sidebar.foldIcons"))
         take(\.sideWidth, "sidebar.width", (store.object(forKey: "sidebar.width") as? Double).map { CGFloat($0) }
@@ -1284,6 +1353,13 @@ final class Preferences: ObservableObject {
             .flatMap { Preferences.sidePanelWidths.contains($0) ? $0 : nil }, or: 380)
         take(\.cards, "layout.cards", store.object(forKey: "layout.cards") as? Bool, or: true)
         take(\.cardsInFullScreen, store.bool(forKey: "layout.cardsFullScreen"))
+        take(\.addressLine, store.bool(forKey: "address.shown"))
+        take(\.addressWidth, "address.width", store.string(forKey: "address.width").flatMap(AddressWidth.init), or: .small)
+        take(\.glass, store.bool(forKey: "window.glass"))
+        take(\.glassGrain, "window.glass.grain", (store.object(forKey: "window.glass.grain") as? Double).map { min(1, max(0, $0)) }, or: 0.2)
+        take(\.glassClear, "window.glass.clear", (store.object(forKey: "window.glass.clear") as? Double).map { min(1, max(0, $0)) }, or: 0.5)
+        take(\.glassStyle, "window.glass.style", store.string(forKey: "window.glass.style").flatMap(GlassStyle.init), or: .frosted)
+        take(\.liquidTabs, store.bool(forKey: "tabs.liquid"))
         take(\.bounces, store.bool(forKey: "pages.bounce"))
         Swipe.bounces = bounces
         take(\.glyph, "glyph", store.string(forKey: "glyph").flatMap(Glyph.init), or: .letters)

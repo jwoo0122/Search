@@ -11,6 +11,11 @@ struct TabBar: View {
     @ObservedObject var browser: Browser
 
     @Namespace private var pill
+    /// The live tab's glass, when it is glass (LiquidTab.swift).
+    @StateObject private var lens = LensMotion()
+    /// The height the tabs and the bar's buttons take, centred in the bar:
+    /// above and below it the bar is title bar (see DragStrip.band).
+    static let band: CGFloat = 30
     /// The neighbouring spaces' own grey, apart from this one's.
     @Namespace private var above
     @Namespace private var below
@@ -25,7 +30,10 @@ struct TabBar: View {
     @State private var nearby = false
     @State private var plussed = false
     /// The helm's width when it stands before the tabs rather than after them.
-    private var leading: CGFloat { browser.prefs.navigationLeft ? Metrics.helm - 8 + Metrics.tabGap : 0 }
+    private var leading: CGFloat {
+        (browser.prefs.navigationLeft ? Metrics.helm - 8 + Metrics.tabGap : 0)
+            + (browser.prefs.addressLine ? browser.prefs.addressWidth.width + AddressLine.after + Metrics.tabGap : 0)
+    }
     /// How wide the doors at the far end are, extension buttons included.
     @State private var doors: CGFloat = 0
     /// The space whose run was last brought to its tab: another one is a
@@ -45,8 +53,11 @@ struct TabBar: View {
             let row = measures(in: geo.size.width)
             ZStack(alignment: .leading) {
                 // The empty half of the strip is what you grab to move the
-                // window; the tabs keep the run they sit on.
-                DragStrip(reserved: lights + dot + leading + (making ? min(540, row.room) : row.run) + Metrics.tabGap + Metrics.plusWidth, trailing: doors + 12, onDoubleClick: browser.newTab)
+                // window; the tabs keep the run they sit on, and the buttons
+                // theirs, only as tall as they are: above and below them is
+                // title bar too.
+                DragStrip(reserved: lights + dot + leading + (making ? min(540, row.room) : row.run) + Metrics.tabGap + Metrics.plusWidth, trailing: doors + 12,
+                          band: making ? nil : TabBar.band, onDoubleClick: browser.newTab)
                 // And the corner the lights sit in, which is title bar too —
                 // the one stretch left to take hold of when tabs fill the row.
                 DragStrip()
@@ -60,6 +71,13 @@ struct TabBar: View {
                     // after a switch.
                     // The profile, once there is more than one (see Profiles.swift).
                     if Profiles.shared.several { ProfileBadge(browser: browser) }
+                    // The page's address, when it is to be in sight: before the tabs.
+                    if browser.prefs.addressLine {
+                        AddressLine(browser: browser)
+                            .frame(width: browser.prefs.addressWidth.width)
+                            .padding(.trailing, AddressLine.after)
+                            .zIndex(2)
+                    }
                     if browser.prefs.usesSpaces { SpaceDot(browser: browser).zIndex(1) }
 
                     // The tabs, in a run of their own. While they fit, it is
@@ -125,7 +143,7 @@ struct TabBar: View {
                                             }
                                         }
                                     }
-                                    .frame(height: Metrics.strip)
+                                    .frame(height: TabBar.band)
                                     .environment(\.rowCarrying, carrying)
                                     .onPreferenceChange(GroupDropFrames.self) { groupFrames = $0 }
                                 }
@@ -136,6 +154,14 @@ struct TabBar: View {
                                 // would show over the lights and the doors.
                                 .scrollClipDisabled(carrying && !row.overflowing)
                                 .frame(width: row.run)
+                                // Only as tall as the tabs: a scroll view is
+                                // AppKit's, over the strip that moves the
+                                // window, and as tall as the bar it took every
+                                // press above and below them too.
+                                .frame(height: TabBar.band)
+                                // The live tab as a pane of Liquid Glass, held
+                                // to the run (LiquidTab.swift).
+                                .liveLens(browser, motion: lens)
                                 .onAppear {
                                     revealedSpace = browser.spaceID
                                     reveal(reader, in: geo.size.width)
@@ -248,8 +274,8 @@ struct TabBar: View {
                 landing ? Palette.hover : Color.clear
                 // The space's colour, if it has one, over whatever ground the
                 // row lies on: the window's, or the one it brings along when
-                // it comes down over the page.
-                SpaceWash(look: browser.wash)
+                // it comes down over the page. On glass the glass wears it.
+                if !browser.glassUnder { SpaceWash(look: browser.wash) }
                 if browser.prefs.splitView {
                     SplitDropZone(browser: browser, tab: nil, kind: .strip)
                 }
@@ -736,6 +762,7 @@ private struct TabPill: View, Equatable {
     @Environment(\.tabShortcutNumbers) private var shortcutNumbers
     /// Black or white with alpha, so on a space's colour the pills take its
     /// tint rather than sit on it as grey patches (see Greys).
+    @Environment(\.liquidTabs) private var liquid
     @Environment(\.greys) private var greys
     @Environment(\.rowCarrying) private var rowCarrying
     let browser: Browser
@@ -1031,8 +1058,9 @@ private struct TabPill: View, Equatable {
             // it says it without adding anything to the window.
             ZStack(alignment: .leading) {
                 // A pinned square among the faint grey of the others: the
-                // darker grey the column's live pin wears too.
-                Rectangle().fill(pinned ? greys.pinLive : greys.wash)
+                // darker grey the column's live pin wears too. Under a pane
+                // of Liquid Glass, the glass is a tab's ground.
+                Rectangle().fill(pinned ? greys.pinLive : (liquid ? Color.clear : greys.wash))
                 // Not on a pinned square, nor a tab down to its mark. Thirty
                 // points of grey filling from the left behind a single letter
                 // says nothing about anything — it needs the width of a title
@@ -1042,7 +1070,7 @@ private struct TabPill: View, Equatable {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .matchedGeometryEffect(id: "live", in: pill)
+            .modifier(LiveMatch(id: "live", in: pill, tab: pinned ? nil : tab.id))
         } else if selected {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(greys.wash)

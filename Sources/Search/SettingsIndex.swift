@@ -128,6 +128,17 @@ enum SettingsIndex {
               title: "Sync with your other Macs", detail: "Spaces, pins, bookmarks and settings, through a folder you choose",
               more: "Choose a folder your Macs share, in iCloud Drive or Dropbox for example, and turn this on with the same folder in Search on each Mac. Each profile syncs on its own. Never your history, passwords, cookies, sign-ins or open tabs. No account and no server: only small files in that folder.",
               keys: ["sync.folder"], words: ["sync", "icloud", "dropbox", "other mac", "devices", "mac"]),
+        .init(id: "handoff", group: "browser", icon: "iphone.and.arrow.forward",
+              title: "Handoff to your iPhone and iPad", detail: "The page in front comes up in their app switcher, as Safari's does",
+              more: "And at the end of the Dock on your other Macs. macOS carries the address to devices signed in to your Apple Account with Handoff on, in System Settings › General › AirDrop & Handoff on a Mac. Never a private tab or a space signed out of the others. Pages handed off from your iPhone open here when Search is your default browser.",
+              keys: ["handoff"], words: ["handoff", "continuity", "iphone", "ipad", "devices", "app switcher", "multitasking"]),
+        .init(id: "icloud", group: "browser", icon: "icloud",
+              title: "Sync with iCloud", detail: "Open tabs, pins, spaces, bookmarks and a few settings, with your iPhone",
+              more: "Through your own iCloud, end to end encrypted: Search on your iPhone and your other Macs see this Mac's open tabs (under History and in the address field, as Tabs on Your Other Devices) and share its pins, spaces, bookmarks, search engine and look. Private tabs never go, nor your history, passwords, cookies or sign-ins. Nothing leaves this Mac until you turn it on. Not together with Sync with your other Macs.",
+              keys: ["icloud.sync"], words: ["sync", "icloud", "iphone", "ios", "cloudkit", "other devices", "devices", "icloud tabs", "tabs on other devices", "handoff"]),
+        .init(id: "icloud.erase", group: "browser", icon: "trash",
+              title: "Delete Search's data from iCloud", detail: "For every device. What is on each one stays, and sync turns off here",
+              words: ["icloud", "delete", "erase", "remove", "sync"], parent: "icloud"),
         .init(id: "quit.confirm", group: "browser", icon: "power",
               title: "Confirm before quitting", detail: "Ask before ⌘Q or Quit Search closes the browser",
               keys: ["quit.confirm"], words: ["quit", "cmd q"]),
@@ -194,9 +205,35 @@ enum SettingsIndex {
               title: "Shorter tab bar", detail: "Only a few points above and below the tabs, for more of the page",
               keys: ["tabs.compact"], words: ["compact", "slim", "thin", "height", "padding", "tab bar", "toolbar"],
               parent: "tabs.layout"),
+        .init(id: "address.shown", group: "window", icon: "link",
+              title: "Always show the address bar", detail: "The page's full address, to type in",
+              keys: ["address.shown"], words: ["address bar", "url", "location", "url bar", "omnibox", "full address"]),
+        .init(id: "address.width", group: "window", icon: "arrow.left.and.right",
+              title: "Address width", detail: "Before the tabs across the top",
+              keys: ["address.width"], words: ["address bar", "url", "width", "wide"], parent: "address.shown"),
+        .init(id: "window.glass", group: "window", icon: "square.on.square.intersection.dashed",
+              title: "Glass", detail: "What is behind the window shows through the tabs and the frame, blurred",
+              more: "As in Arc and Zen. The glass takes the space's colour; how see-through it is, and its grain, are in the space's menu › Colour…. Not in full screen.",
+              keys: ["window.glass"], words: ["glass", "translucent", "transparent", "blur", "frosted", "vibrancy", "see through", "arc", "zen"]),
+        .init(id: "window.glass.style", group: "window", icon: "drop",
+              title: "Glass style", detail: "Frosted, or the Mac's Liquid Glass",
+              keys: ["window.glass.style"], words: ["liquid glass", "liquid", "frosted", "glass", "tahoe"], parent: "window.glass"),
+        .init(id: "window.glass.clear", group: "window", icon: "circle.lefthalf.filled",
+              title: "Transparency", detail: "From the space's colour on the glass to clear glass",
+              keys: ["window.glass.clear"], words: ["transparency", "tint", "opacity", "glass"], parent: "window.glass"),
+        .init(id: "window.glass.grain", group: "window", icon: "circle.dotted",
+              title: "Grain", detail: "A still noise over the glass",
+              keys: ["window.glass.grain"], words: ["grain", "noise", "texture", "glass"], parent: "window.glass"),
+        .init(id: "tabs.liquid", group: "tablook", icon: "drop.halffull",
+              title: "Liquid Glass tab", detail: "The tab you're on under a pane of Liquid Glass that glides, stretches and settles",
+              more: "It bends the tabs it passes over. Pinned tabs and split pages keep their grey. Under Reduce Motion it goes straight to the tab you pick.",
+              keys: ["tabs.liquid"], words: ["liquid glass", "liquid", "glass", "active tab", "selected tab", "animation", "wobble"]),
         .init(id: "sidebar.roomy", group: "tablook", icon: "textformat.size.larger",
               title: "Roomier tabs", detail: "Taller rows and larger titles in the column",
               keys: ["sidebar.roomy"], words: ["bigger", "larger", "text size", "accessibility"], parent: "tabs.layout"),
+        .init(id: "sidebar.doorsUp", group: "tablook", icon: "rectangle.topthird.inset.filled",
+              title: "Buttons at the top", detail: "Bookmarks, extensions and downloads beside back, forward and reload, when they fit",
+              keys: ["sidebar.doorsUp"], words: ["minimal", "toolbar", "footer", "bottom", "icons", "clean"], parent: "tabs.layout"),
         .init(id: "sidebar.player", group: "tablook", icon: "play.circle",
               title: "What's playing in other tabs", detail: "At the foot of the sidebar, to pause it, play it again or go to it",
               more: "A tab playing sound while you're on another one shows above the sidebar's foot.",
@@ -383,6 +420,13 @@ enum SettingsIndex {
               more: "Links from other apps, and links a page in another space opens in a new tab. A site includes its subdomains. Typed addresses, links followed in their own tab and private tabs stay where they are. Right-click a tab to send its site to the space it is in.",
               keys: [SpaceRoutes.key, SpaceRoutes.rulesKey],
               words: ["arc", "air traffic control", "route", "routing", "rules", "domain", "site", "open in space", "default space", "links from other apps"],
+              parent: "spaces"),
+        .init(id: "links.ask", group: "spaces", icon: "questionmark.square.dashed",
+              title: "Ask which space for links from other apps",
+              detail: "Choose the space a link from another app opens in, before it loads",
+              more: "A small panel lists every space: a number key opens the link in that space, and Return in the marked one. With Send links to a space on, Always saves a rule for its site.",
+              keys: ["links.ask", "links.ask.last"],
+              words: ["choose space", "which space", "links from other apps", "panel", "ask"],
               parent: "spaces"),
         .init(id: "pins.keep", group: "pins", icon: "pin.circle",
               title: "Pins keep their site", detail: "Links elsewhere open over the pin, and ⌘W takes it back home",
@@ -613,20 +657,26 @@ enum SettingsIndex {
         switch item.id {
         case "pages.dusk": return prefs.look != .light
         case "inspector.dark": return prefs.look != .dark
-        case "sidebar.roomy", "sidebar.player": return prefs.sidebar && !prefs.sideIcons
+        case "sidebar.roomy", "sidebar.player", "sidebar.doorsUp": return prefs.sidebar && !prefs.sideIcons
         case "sidebar.hides", "sidebar.slides", "layout.cards", "pins.list": return prefs.sidebar
         case "layout.cardsFullScreen": return prefs.sidebar && prefs.cards
+        case "address.width": return prefs.addressLine && !prefs.sidebar
+        case "tabs.liquid": return LiquidTab.available && !(prefs.sidebar && prefs.sideIcons)
+        case "window.glass.style": return prefs.glass && GlassStyle.liquidAvailable
+        // With spaces on they are in the space's Colour…, beside its colour.
+        case "window.glass.clear", "window.glass.grain": return prefs.glass && !prefs.usesSpaces
         case "pins.folders": return prefs.sidebar && prefs.listsPins
         case "sidebar.foldIcons": return prefs.sidebar && !prefs.sideHides
         case "toolbar.left", "tabs.compact": return !prefs.sidebar
         case "profiles.oneWindow": return Profiles.shared.several
-        case "spaces.links": return prefs.usesSpaces
+        case "spaces.links", "links.ask": return prefs.usesSpaces
         case "tabs.frontBeside": return prefs.newTabPlace == .next
         case "newtab.recent": return prefs.floatingNewTab
         case "links.little.tabs": return prefs.littleLinks
         case "mail.default": return prefs.webmail != .none
         case "links.peek.stays": return prefs.peeksLinks || prefs.pinsPeek
         case "launcher.key": return prefs.launcher
+        case "icloud.erase": return ICloudSync.shared.on
         default: return true
         }
     }
@@ -636,11 +686,15 @@ enum SettingsIndex {
         switch item.id {
         case "pages.dusk": return "Only while Search isn't set to Light"
         case "inspector.dark": return "Only while Search isn't set to Dark"
-        case "toolbar.left", "tabs.compact": return "Only with the tabs across the top"
-        case "sidebar.roomy": return "Only with titles in the column"
+        case "toolbar.left", "tabs.compact", "address.width": return "Only with the tabs across the top"
+        case "sidebar.roomy", "sidebar.doorsUp": return "Only with titles in the column"
+        case "tabs.liquid": return LiquidTab.available ? "Only with titles in the column, or the tabs across the top" : "Liquid Glass needs macOS 26"
+        case "window.glass.style": return GlassStyle.liquidAvailable ? "Only with Glass on" : "Liquid Glass needs macOS 26"
+        case "window.glass.clear", "window.glass.grain": return "With spaces on, in the space's menu › Colour…"
         case "sidebar.foldIcons": return "Only with the column down a side and not hidden until the edge"
+        case "icloud.erase": return "Only while Sync with iCloud is on"
         case "profiles.oneWindow": return "Only with more than one profile"
-        case "spaces.links": return "Only with Spaces on"
+        case "spaces.links", "links.ask": return "Only with Spaces on"
         case "sidebar.player": return "Only with titles in the sidebar"
         case "tabs.frontBeside": return "Only with New tab position on After current"
         case "newtab.recent": return "Only with the new tab in a floating field"
