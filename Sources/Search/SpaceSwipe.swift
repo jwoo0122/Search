@@ -153,10 +153,18 @@ final class SpaceSwipe {
         let target = here + step
         if let other = beyond(browser, target) {
             leave(browser, for: other, step: step)
-        } else if target >= 0, target <= browser.spaces.count {
+        } else if target >= 0, target <= furthest(browser) {
             slide(browser, to: target, from: here)
         }
         return true
+    }
+
+    /// The furthest page a stroke or a notch can bring: the card for a new
+    /// space past the last one, but not while there is only one space. Spaces
+    /// just turned on, a stroke over the tabs brought a nameless card that
+    /// looked like a second space nobody made; New Space… still opens it.
+    private func furthest(_ browser: Browser) -> Int {
+        browser.spaces.count > 1 || browser.makingSpace ? browser.spaces.count : browser.spaces.count - 1
     }
 
     /// With profiles in one window, past this window's first space or its
@@ -241,6 +249,8 @@ final class SpaceSwipe {
         let here = taken(browser), from = shown(browser)
         guard let to = browser.spaces.firstIndex(where: { $0.id == id }) else { return }
         let slot = to == here ? 0 : abs(to - from) <= 1 ? to - here : from - here + step
+        // Carried back to its own space: the wash with it, not the one clicked.
+        if to == here, browser.spaceHeading != nil { browser.spaceHeading = nil }
         let moved = browser.spaceComing != (to == here ? nil : id) || browser.comingSlot != slot
         browser.spaceComing = to == here ? nil : id
         browser.comingSlot = slot
@@ -397,7 +407,7 @@ final class SpaceSwipe {
             let target = here + (step < 0 ? 1 : -1)
             if let other = beyond(browser, target) {
                 leave(browser, for: other, step: target - here)
-            } else if target >= 0, target <= browser.spaces.count {
+            } else if target >= 0, target <= furthest(browser) {
                 slide(browser, to: target, from: here)
             }
             return true
@@ -548,7 +558,7 @@ final class SpaceSwipe {
             leave(browser, for: other, step: target - here)
             return
         }
-        guard target != here, target >= 0, target <= browser.spaces.count else {
+        guard target != here, target >= 0, target <= furthest(browser) else {
             // Back where they were: the space on screen, or on its way in.
             if let coming = browser.spaceComing, !browser.makingSpace, !Motion.reduced {
                 letGoSpeed = speed
@@ -570,7 +580,7 @@ final class SpaceSwipe {
     /// card for a new space they go heavily, for it not to come by chance.
     private func resisted(_ travel: CGFloat, in browser: Browser) -> CGFloat {
         let here = shown(browser)
-        let blocked = (travel > 0 && here == 0 && browser.profileBeyond(-1) == nil) || (travel < 0 && here == browser.spaces.count)
+        let blocked = (travel > 0 && here == 0 && browser.profileBeyond(-1) == nil) || (travel < 0 && here >= furthest(browser))
         return blocked ? travel / 4 : toCard(travel, in: browser) ? travel * 0.6 : travel
     }
 
@@ -776,8 +786,6 @@ struct NewSpaceCard: View {
 /// How far a swipe between spaces has carried the rows (`Browser.spaceSwipe`).
 final class SwipeOffset: ObservableObject {
     @Published var value: CGFloat = 0
-    /// One that never moves, for what stands still while the rest move.
-    static let still = SwipeOffset()
 }
 
 /// Which way a swipe between spaces has carried the rows, -1, 0 or 1
@@ -853,11 +861,21 @@ struct SwipeShift: ViewModifier {
     func body(content: Content) -> some View {
         let shift = place
         return content.offset(x: across ? shift : 0, y: across ? 0 : shift)
+            // Parked, hidden as well as out of the way: it lay over the
+            // page, under it, and whatever moved in its rows — the ring of a
+            // tab loading — drew the window again at every frame, for as
+            // long as the tab took (idea 847).
+            .opacity(parked ? 0 : 1)
+    }
+
+    private var parked: Bool {
+        guard let park else { return false }
+        return offset.value == 0 || abs(offset.value + by) >= park
     }
 
     private var place: CGFloat {
         let shift = offset.value + by
-        if let park, offset.value == 0 || abs(shift) >= park { return 4 * park }
+        if let park, parked { return 4 * park }
         // On the screen's own pixels: moved by fractions of one, the titles
         // were drawn afresh at each frame, a little further between two
         // pixels, and flickered as the rows went slowly by.

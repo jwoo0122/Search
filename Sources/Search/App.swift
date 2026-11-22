@@ -138,6 +138,11 @@ struct SearchApp: App {
                         get: { browser.prefs.autocorrect },
                         set: { browser.prefs.autocorrect = $0 }
                     ))
+                    // Off unless switched on here, whatever the Mac says.
+                    Toggle("Show Inline Predictions", isOn: Binding(
+                        get: { browser.prefs.inlinePredictions },
+                        set: { browser.prefs.inlinePredictions = $0 }
+                    ))
                 }
             }
             CommandGroup(replacing: .toolbar) {
@@ -530,6 +535,7 @@ struct ContentView: View {
     @State private var held = WeakWindow()
     private var window: NSWindow? { held.window }
     @State private var resting: RestingLights?
+    @State private var reveal: FullScreenReveal?
     /// The room the page leaves for the column and the strip, set without
     /// animation (see `make(room:after:)`); nil only before the window is up.
     @State private var room: CGSize?
@@ -679,6 +685,9 @@ struct ContentView: View {
                     }
                 }
                 .animation(Motion.quick, value: browser.applePairing)
+        } else if browser.prefs.homeTheme != .off {
+            HomeBackground(theme: browser.prefs.homeTheme, tuning: browser.prefs.homeTuning,
+                           image: browser.prefs.homeThemeImage, shuffle: browser.prefs.homeShuffle)
         } else {
             Palette.ground
         }
@@ -843,12 +852,15 @@ struct ContentView: View {
         // an ordinary tab that is not currently paired. Drawing it here too
         // leaves two offset address fields on a blank tab.
         if !browser.prefs.splitView {
-            Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true))
-                // Centred on the page, not on the window. The column of tabs
-                // is not what the field is standing over, and dimming it along
-                // with the page says otherwise.
-                .padding(.leading, sidebar && !sideOnRight ? sideWidth : 0)
-                .padding(.trailing, sidebar && sideOnRight ? sideWidth : 0)
+            ZStack {
+                HomeGrid(browser: browser)
+                Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true))
+            }
+            // Centred on the page, not on the window. The column of tabs
+            // is not what the field is standing over, and dimming it along
+            // with the page says otherwise.
+            .padding(.leading, sidebar && !sideOnRight ? sideWidth : 0)
+            .padding(.trailing, sidebar && sideOnRight ? sideWidth : 0)
         }
     }
 
@@ -970,6 +982,10 @@ struct ContentView: View {
             // is pressed the page is on its way, and the field is not what
             // there is to watch.
             .animation(browser.fieldShowing ? Motion.settle : Motion.quick, value: browser.fieldShowing)
+            // The menu bar brought down in full screen takes the top: the bars
+            // start under it (see FullScreenReveal).
+            .padding(.top, browser.revealInset)
+            .ignoresSafeArea()
             .background(windowSetup)
             .onChange(of: browser.prefs.sidebar) { _, _ in
                 DispatchQueue.main.async { Lights.refresh(window); measureLights() }
@@ -1019,10 +1035,10 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { note in
-                if let window, (note.object as? NSWindow) === window { browser.fullScreen = true }
+                if let window, (note.object as? NSWindow) === window { browser.fullScreen = true; reveal?.entering() }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willExitFullScreenNotification)) { note in
-                if let window, (note.object as? NSWindow) === window { browser.fullScreen = false }
+                if let window, (note.object as? NSWindow) === window { browser.fullScreen = false; reveal?.leaving() }
             }
             // And as it is once there, or back: a way in that macOS gave up
             // on half way says so only by where the window ends up.
@@ -1257,6 +1273,8 @@ struct ContentView: View {
         window.titleVisibility = .hidden
         // A window put back in full screen is so before any notice says it.
         browser.fullScreen = window.styleMask.contains(.fullScreen)
+        if reveal == nil { reveal = FullScreenReveal(window: window, browser: browser) }
+        if browser.fullScreen { reveal?.entering() }
         browser.paintGround(window)
         // The strip does the dragging, so the page underneath can't be grabbed
         // by accident while selecting text.
@@ -1359,6 +1377,10 @@ struct ContentView: View {
                 return event
             }
             ContentView.keyed(event)
+            // Escape while a page holds the pointer (a game, see PointerLock)
+            // is the page's, which lets the pointer go on it, ahead of the
+            // find bar, the field, or a full screen's Esc twice.
+            if PointerLock.shared.escape(event) { return event }
             // Escape on a page filling the screen is WebKit's, which leaves
             // on the first one, as Safari does. Its window isn't a browser's,
             // so the key came here first and put away what was left up in
@@ -1422,6 +1444,14 @@ struct ContentView: View {
     /// (see `forget`), and they no longer hold its browser.
     private static var monitors: [ObjectIdentifier: Any] = [:]
 
+    /// The browser whose monitor takes a popup window's keys: the window in
+    /// front that isn't a popup, or else the first that still listens.
+    private static var popupKeys: Browser? {
+        let front = Browsers.frontBrowser
+        if monitors[ObjectIdentifier(front)] != nil { return front }
+        return Browsers.all.first { monitors[ObjectIdentifier($0)] != nil }
+    }
+
     static func forget(_ browser: Browser) {
         let id = ObjectIdentifier(browser)
         if let monitor = monitors.removeValue(forKey: id) { NSEvent.removeMonitor(monitor) }
@@ -1431,8 +1461,11 @@ struct ContentView: View {
     /// Whether a key is this window's to act on.
     private func mine(_ event: NSEvent) -> Bool {
         if let window = event.window, let owner = Browsers.browser(for: window) {
-            // Popup hosts have no ContentView monitor of their own.
-            return owner.isPopup ? Browsers.acting === browser : window === self.window
+            // Popup hosts have no ContentView monitor of their own: a window
+            // behind takes their keys. Not `acting`, which is the popup
+            // itself once it has opened in front (#1146), so no monitor took
+            // them and Escape left its camera question up.
+            return owner.isPopup ? ContentView.popupKeys === browser : window === self.window
         }
         return Browsers.acting === browser
     }
@@ -1746,6 +1779,10 @@ struct ContentView: View {
             || (browser.prefs.splitView && flags.intersection([.command, .shift, .option, .control]) == [.command, .option]),
            browser.peekInFront, let peek = browser.peekTab, !peek.typing, peek.built?.inputContext == nil {
             browser.keepPeek(beside: flags.contains(.option))
+            return true
+        }
+        if key == "o", flags.intersection([.command, .shift, .option, .control]) == .command, browser.peekInFront {
+            browser.keepPeek()
             return true
         }
 

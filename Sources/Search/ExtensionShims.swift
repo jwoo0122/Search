@@ -1094,12 +1094,15 @@ enum ExtensionShims {
         const fetch = function fetch(input, init) {
           const self = this, args = arguments;
           // Read cheaply first: only credentials "include" is the browser's,
-          // and from a page "same-origin", the default, too: Chrome counts a
-          // granted host as the extension's own origin, so its cookies go
-          // with a plain fetch there. Save to Notion's popup asks Notion's
-          // API so and, given no session, said "Log in" while its tabs were
-          // signed in. Not yet from the worker, whose plain fetches are many
-          // (images, an app on the Mac polled with a short timeout).
+          // and "same-origin", the default, too: Chrome counts a granted
+          // host as the extension's own origin, so its cookies go with a
+          // plain fetch there. Save to Notion's popup asks Notion's API so
+          // and, given no session, said "Log in" while its tabs were signed
+          // in. From the worker as from a page: Brandsearch's asks its site
+          // for the account with its token and no word about credentials,
+          // the site lets a request in on its session cookie alone, and
+          // without it answered with its sign-in page, which the panel read
+          // as the account: it stayed grey.
           // Any other fetch goes on untouched, its body unread.
           let credentials;
           try {
@@ -1120,7 +1123,7 @@ enum ExtensionShims {
               return /^https?:$/.test(u.protocol) && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
             } catch (e) { return false; }
           };
-          if (credentials !== "include" && (worker || credentials !== "same-origin") && !(worker && loopback())) {
+          if (credentials !== "include" && credentials !== "same-origin" && !(worker && loopback())) {
             return original.apply(self, args);
           }
           // A copy to read, so the page's own Request keeps its body for
@@ -1141,7 +1144,7 @@ enum ExtensionShims {
             return await new Promise((resolve, reject) => {
               let port;
               try { port = connect("search.fetch"); } catch (e) { resolve(original.apply(self, args)); return; }
-              let accepted = false, tries = 0, controller = null, done = false;
+              let accepted = false, tries = 0, bounced = 0, controller = null, done = false;
               const close = () => { try { port.disconnect(); } catch (e) {} };
               // The browser never took it: WebKit's fetch, as without it. Not
               // for a request that changes something, which may already have
@@ -1167,6 +1170,11 @@ enum ExtensionShims {
               };
               port.onMessage.addListener((m) => {
                 if (!m || done) return;
+                // A worker's first words on a port can come back to it
+                // instead of reaching the browser (see below). Said again
+                // at once rather than at `again`'s next turn, 100 ms on: a
+                // worker's plain fetches are many.
+                if (m.fetch === id) { if (!accepted && bounced++ < 5) { try { port.postMessage(hello); } catch (e) {} } return; }
                 if (m.accepted === id) { accepted = true; return; }
                 if (m.pass) { done = true; close(); resolve(original.apply(self, args)); return; }
                 if (m.head && m.head.opaqueRedirect) {
@@ -2220,9 +2228,62 @@ enum ExtensionShims {
         if (root.HTMLIFrameElement && runtime && typeof runtime.getURL === "function") {
           const ownBase = runtime.getURL("");
           const given = new WeakMap();
+          // One of the extension's pages in a frame that itself stands in
+          // an empty frame, as Similarweb's panel does: a frame with no
+          // address, out of reach of the site's styles, and the panel's
+          // page in a frame inside it. WebKit checks
+          // web_accessible_resources against the address of the frame just
+          // above (WebExtensionURLSchemeHandler), there about:blank, which
+          // no pattern matches: the page is refused without a word, the
+          // frame stays blank, and Similarweb, waiting for it to load,
+          // never slid its panel in — its button did nothing. Chrome
+          // checks against the site the empty frame has its origin from.
+          //
+          // A document opened by a script of another takes that one's
+          // address (document.open), in WebKit's own record of the frame
+          // too. So the empty frame is opened and closed from here, its
+          // content lifted out before and put back after: the same nodes,
+          // with all that was set on them. Put back, the frame inside
+          // loads again and is let through, checked against the site as
+          // Chrome checks it. Closing fires `load` on the empty frame once
+          // more, a moment later; the extension, which built its panel
+          // when it first loaded, would build a second: that one event
+          // stops here. Not from a script that is in an empty frame
+          // itself: its own address is no better.
+          const empty = (d) => !!d && /^about:(blank|srcdoc)/.test(d.URL);
+          const house = (frame) => {
+            if (!frame.isConnected) return false;
+            const d = frame.ownerDocument;
+            const above = d !== document && empty(d) && !empty(document) && d.defaultView && d.defaultView.frameElement;
+            if (!above) return true;
+            const content = d.documentElement;
+            const hush = (event) => { event.stopImmediatePropagation(); heard(); };
+            const heard = () => above.removeEventListener("load", hush, true);
+            above.addEventListener("load", hush, true);
+            setTimeout(heard, 2000);
+            try {
+              if (content) d.removeChild(content);
+              d.open();
+              d.close();
+            } catch (e) { heard(); }
+            try {
+              if (content && !content.parentNode) {
+                if (d.documentElement) d.replaceChild(content, d.documentElement); else d.appendChild(content);
+              }
+            } catch (e) {}
+            return true;
+          };
+          // Given its address before it is put in a document, more often
+          // than after: looked at once the script that did both is done,
+          // and a few times more for one put in later.
+          const settle = (frame, waits) => {
+            if (house(frame) || !waits.length) return;
+            setTimeout(() => settle(frame, waits.slice(1)), waits[0]);
+          };
           const remember = (frame, value) => {
             const address = String(value);
             if (address.startsWith(ownBase)) given.set(frame, address); else given.delete(frame);
+            if (given.has(frame)) Promise.resolve().then(() => settle(frame, [0, 50, 250, 1000]));
           };
           const proto = HTMLIFrameElement.prototype;
           const d = Object.getOwnPropertyDescriptor(proto, "src");
@@ -4688,6 +4749,21 @@ enum ExtensionShims {
 
       // Members of namespaces WebKit has.
       if (chrome.i18n && !chrome.i18n.detectLanguage) put(chrome.i18n, "detectLanguage", call("i18n.detectLanguage"));
+      // WebKit's i18n functions answer null (getMessage) when called loose, off
+      // their object: `const t = chrome.i18n.getMessage; t("key")` — how Monarch
+      // Money's bundle reads every string, so its options page had no text.
+      // Chrome's are plain functions. Bound to their object, as Chrome's act.
+      for (const ns of new Set([chrome.i18n, root.browser && root.browser.i18n])) {
+        if (!ns) continue;
+        for (const key of ["getMessage", "getUILanguage", "detectLanguage", "getAcceptLanguages"]) {
+          const fn = ns[key];
+          if (typeof fn === "function" && !fn.__searchBound) {
+            const bound = function () { return fn.apply(ns, arguments); };
+            try { Object.defineProperty(bound, "__searchBound", { value: true }); } catch (e) {}
+            put(ns, key, bound);
+          }
+        }
+      }
       if (runtime && !runtime.getContexts) put(runtime, "getContexts", call("runtime.getContexts"));
 
       // Chrome's old FileSystem API — requestFileSystem, entries, FileWriter and
@@ -5407,8 +5483,19 @@ enum ExtensionShims {
             return kids.enumerated().map { node($1, parent: key, index: $0, deep: false) }
         case "bookmarks.get":
             let keys = (first as? [String]) ?? (first as? String).map { [$0] } ?? []
-            return keys.compactMap { key in
-                find(key, in: browser.bookmarks.roots).map { node($0.node, parent: $0.parent, index: $0.index, deep: false) }
+            // The root and the bar answer too: every top-level bookmark names
+            // "1" as its parent, and sync extensions such as Floccus walk
+            // parentId up with get until a node has none.
+            // An id that names nothing is an error, as in Chrome, not an empty
+            // answer: Floccus asks for Firefox's "root________" and falls back
+            // to getTree only when that fails.
+            return try keys.map { key in
+                if key == "0" { return root(browser.bookmarks.roots, deep: false) }
+                if key == "1" { return bar(browser.bookmarks.roots, deep: false) }
+                guard let hit = find(key, in: browser.bookmarks.roots) else {
+                    throw Unsupported(what: "Can't find bookmark for id.")
+                }
+                return node(hit.node, parent: hit.parent, index: hit.index, deep: false)
             }
         case "bookmarks.getRecent":
             let count = (first as? Int) ?? 10
@@ -6459,8 +6546,10 @@ enum ExtensionShims {
         return out
     }
 
-    private static func root(_ roots: [Bookmark]) -> [String: Any] {
-        ["id": "0", "title": "", "dateAdded": 0, "syncing": false, "children": [bar(roots)]]
+    private static func root(_ roots: [Bookmark], deep: Bool = true) -> [String: Any] {
+        var out: [String: Any] = ["id": "0", "title": "", "dateAdded": 0, "syncing": false]
+        if deep { out["children"] = [bar(roots)] }
+        return out
     }
 
     private static func visit(_ trace: History.Trace) -> [String: Any] {

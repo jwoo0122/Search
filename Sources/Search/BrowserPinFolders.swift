@@ -19,12 +19,6 @@ enum PinRowLine: Identifiable {
         }
     }
 
-    var depth: Int {
-        switch self {
-        case .folder(_, let depth), .pin(_, let depth), .item(_, _, let depth): depth
-        }
-    }
-
     /// For the bench: what it is, how far in, and what it says.
     @MainActor var described: [Any] {
         switch self {
@@ -90,7 +84,9 @@ extension Browser {
 
     /// Whether a pin can go in a folder: a row of this space's own.
     func takesFolder(_ tab: Tab) -> Bool {
-        tab.pin != nil && tab.listed && !tab.everywhere && !tab.shy
+        // A split pinned whole stays at the top of the rows: a folder's
+        // lines hold one page each.
+        tab.pin != nil && tab.listed && !tab.everywhere && !tab.shy && pinnedPair(of: tab) == nil
     }
 
     /// New Folder: inside `parent`, or beside `tab` in the folder it is in,

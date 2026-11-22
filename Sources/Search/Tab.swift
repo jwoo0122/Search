@@ -133,6 +133,7 @@ enum Web {
             PrivacySignal.apply(to: config, shy: shy)
             ClickIDs.apply(to: config.preferences, shy: shy)
         }
+        HTTPSFirst.apply(to: config)
         if Store.testing, !Store.measuring { config.preferences.inactiveSchedulingPolicy = .none }
         inspector(config.preferences)
         backspaceStays(config.preferences)
@@ -361,6 +362,8 @@ final class Tab: ObservableObject, Identifiable {
 
     func didCommit() {
         popupGesture.clear()
+        // A woken page has its sessionStorage back; later ones don't get it.
+        if KeptSession.committed(self) { arm(hiding: veils) }
         // What the old page was refused went with it.
         if !blockedPopups.isEmpty { blockedPopups = [] }
         // A translated page is gone; its frames with it.
@@ -1215,6 +1218,11 @@ final class Tab: ObservableObject, Identifiable {
         // an extension's page script can carry the patch either way (see
         // Passkeys.swift and ExtensionShims.passkeys).
         if !FormRelay.passkeysOffered {
+            // A security key still works with passkeys off: Search's handling
+            // goes first, and the off patch hands it only what a key answers.
+            if Passkeys.securityKeysPossible {
+                add(PasskeyRelay.keysOnly, .atDocumentStart, mainFrameOnly: false, in: .page)
+            }
             add(FormRelay.withoutPasskeys, .atDocumentStart, mainFrameOnly: false, in: .page)
         } else {
             add(PasskeyRelay.page, .atDocumentStart, mainFrameOnly: false, in: .page)
@@ -1244,6 +1252,10 @@ final class Tab: ObservableObject, Identifiable {
         // SiteStyles.swift).
         if let style = SiteStyles.shared.css(on: SiteStyles.host(of: url ?? pageAddress)) {
             add(SiteStyles.script(style), .atDocumentStart, mainFrameOnly: true, in: Web.world)
+        }
+        // A woken page's sessionStorage, back before its scripts (KeptSession).
+        if let kept = KeptSession.script(for: self) {
+            add(kept, .atDocumentStart, mainFrameOnly: true, in: Web.world)
         }
         // The same scripts as the document before's, the usual case, are
         // left where they are: taken out and put back, every one was sent to
@@ -1489,6 +1501,10 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     func go(to url: URL) {
+        // You going somewhere: a certificate cancelled on the page before
+        // may be asked for again (ClientCertificates.swift). Not the page
+        // going somewhere by itself, which could ask on and on.
+        (delegate as? Browser)?.certificateDeclined.remove(id)
         if let own = InternalPage(url: url) {
             show(own)
             return
@@ -1942,6 +1958,7 @@ final class Tab: ObservableObject, Identifiable {
     /// A view that has lost its document is given the address back instead:
     /// there is nothing else for it to reload.
     func reload(fromOrigin: Bool = false) {
+        (delegate as? Browser)?.certificateDeclined.remove(id)
         // Search's own pages are drawn from what is there now, always.
         guard page == nil else { return }
         // A pin put down with ⌘W has no view left to reload; waking it is
@@ -2014,6 +2031,7 @@ final class Tab: ObservableObject, Identifiable {
     }
     /// Straight to a page several steps away, as one step.
     func go(to item: WKBackForwardListItem) {
+        (delegate as? Browser)?.certificateDeclined.remove(id)
         loadGeneration &+= 1
         web.go(to: item)
     }

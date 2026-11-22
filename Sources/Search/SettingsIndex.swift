@@ -67,6 +67,8 @@ enum SettingsIndex {
         .init(id: "tablook", page: .appearance, title: "Tabs", icon: "textformat.size"),
         .init(id: "motion", page: .appearance, title: "Motion", icon: "wind"),
 
+        .init(id: "themes", page: .themes, title: "Home background", icon: "photo.artframe"),
+
         .init(id: "newtabs", page: .tabs, title: "New tabs", icon: "plus.square"),
         .init(id: "memory", page: .tabs, title: "Memory", icon: "moon.zzz"),
         .init(id: "tabbar", page: .tabs, title: "In the tab bar", icon: "number"),
@@ -155,6 +157,14 @@ enum SettingsIndex {
               more: "In a tab, as the side panel's card floating by the downloads button, or in the side panel beside the page.",
               keys: ["downloads.open"], words: ["downloads window", "popover", "side panel"]),
 
+        // Themes
+        .init(id: "home.theme", group: "themes", icon: "photo.artframe",
+              title: "Home background", detail: "Paint the blank tab: a wall, stickers, a colour, a gradient or your own picture",
+              more: "Off by default. Drawn once and kept, so it costs nothing while you browse, and only the blank tab shows it. A picture you choose is copied inside Search; nothing leaves your Mac.",
+              keys: ["home.theme", "home.theme.image", "home.tuning", "home.shuffle"],
+              words: ["themes", "wallpaper", "background", "mural", "painting", "scenery", "shuffle", "stickers", "gradient", "colour", "color", "new tab", "image"],
+              kind: .wide),
+
         // Appearance
         .init(id: "look", group: "theme", icon: "circle.lefthalf.filled",
               title: "Appearance", detail: "Light, dark, or whatever the Mac is doing. Pages follow it too",
@@ -239,7 +249,8 @@ enum SettingsIndex {
               more: "A tab playing sound while you're on another one shows above the sidebar's foot.",
               keys: ["sidebar.player"], words: ["media", "music", "now playing", "pause", "player", "sound", "audio"], parent: "tabs.layout"),
         .init(id: "glyph", group: "tablook", icon: "app",
-              title: "Tabs show", detail: "Beside the title, and on a pinned square",
+              title: "Tabs show", detail: "A letter or the site's icon",
+              more: "Beside the title, and on a pinned square.",
               keys: ["glyph"], words: ["favicon", "icons", "letters"]),
         .init(id: "tabs.highContrast", group: "tablook", icon: "bold",
               title: "High contrast text", detail: "Tab titles in black or white, instead of soft grey",
@@ -278,6 +289,14 @@ enum SettingsIndex {
               title: "Closing a tab goes back to the one before", detail: "Otherwise you land on the tab beside it",
               more: "The tab you viewed last in this space, as ⌃Tab would take you. The other half of a Split View stays first.",
               keys: ["tabs.closeGoesBack"], words: ["close", "previous tab", "recent"]),
+        .init(id: "tabs.swipeBackCloses", group: "newtabs", icon: "xmark.circle",
+              title: "Swipe back closes a tab a link opened", detail: "Back to the tab you were on, as Safari and Arc do",
+              more: "On the page a link opened in a new tab, with nothing before it, a swipe back shows a cross and closes the tab, then goes to the tab you viewed last. Pages you clicked through in the tab go back as usual first. Only the swipe: a mouse's back button does nothing there, as before.",
+              keys: ["tabs.swipeBackCloses"], words: ["swipe", "back", "close", "target blank", "new tab", "opener", "gesture", "link"]),
+        .init(id: "home.grid", group: "newtabs", icon: "square.grid.4x3.fill",
+              title: "Show the Home bookmarks on a new tab", detail: "The sites of your bookmark folder called Home, under the address field",
+              more: "Make a folder called Home in Bookmarks and put sites in it: a blank tab shows up to 16 of them as tiles with their names, in the order you keep them.",
+              keys: ["home.grid"], words: ["home", "home page", "start page", "new tab", "speed dial", "favorites"]),
         .init(id: "tabs.undoReopens", group: "newtabs", icon: "arrow.uturn.backward.circle",
               title: "⌘Z reopens a closed tab", detail: "Right after closing it, as ⇧⌘T would bring it back",
               more: "Only while closing it is the last thing you did: type or click anything else and ⌘Z undoes as before. A page that uses ⌘Z itself, such as a document or a drawing, keeps it.",
@@ -407,6 +426,12 @@ enum SettingsIndex {
               keys: [Preferences.spacesOnCommandKey],
               words: ["arc", "cmd", "command", "control", "ctrl", "spaces", "numbers", "digits", "shortcut", "keys", "⌘1", "⌃1", "switch spaces", "swap"],
               parent: "spaces"),
+        .init(id: "spaces.buttons", group: "spaces", icon: "square.grid.3x1.below.line.grid.1x2",
+              title: "One button per space", detail: "Every space beside the bookmarks, one click away",
+              more: "In place of the space's single icon and its menu. A click on the space you are in opens that menu. At the foot of the column the buttons are centred.",
+              keys: [Preferences.spaceButtonsKey],
+              words: ["arc", "spaces", "buttons", "icons", "switcher", "dot", "footer", "bottom"],
+              parent: "spaces"),
         .init(id: "profiles", group: "spaces", icon: "person.2",
               title: "Profiles", detail: "Spaces with their own sign-ins, history and bookmarks",
               more: "In windows of their own, unless Profiles in one window is on. Extensions, passwords and settings are shared.",
@@ -457,6 +482,10 @@ enum SettingsIndex {
               title: "Recent places in the new tab", detail: "Before you type, ⌘T's field lists the last three places you went",
               more: "From History on this Mac, leaving out pages already open, which ⌘K finds. Nothing is picked until an arrow key picks it, and a private tab lists nothing.",
               keys: ["newtab.recent"], words: ["recent", "history", "suggestions", "cmd t", "last visited"], parent: "newtab.floating"),
+        .init(id: "newtab.arc", group: "opening", icon: "rectangle.stack",
+              title: "⌘T finds your open tabs", detail: "As you type, an open tab or a pin that matches is picked, and Return goes to it",
+              more: "As you type, an open tab that matches is picked, else a pin, else the place from history the field completes to, so Return switches to a page you have instead of opening it again. ↑ lets go of the tab, and Return opens what you typed.",
+              keys: ["newtab.arc"], words: ["arc", "open tabs", "switch tab", "pins", "cmd t", "tab search"], parent: "newtab.floating"),
         .init(id: "commandbar", group: "opening", icon: "chevron.right.square",
               title: "Address bar commands", detail: "\"settings\" or \"new tab\" alone in the address field goes there",
               more: "Part of a name, like \"down\" or \"dwn\", shows the command lower in the list, with every menu command and Settings page whose name has the words typed, as Arc's Command Bar.",
@@ -493,7 +522,7 @@ enum SettingsIndex {
               keys: ["shield"], words: ["adblock", "ad blocker", "ads", "youtube"]),
         .init(id: "sites.keep", group: "blocking", icon: "eye.slash",
               title: "Prevent cross-site tracking", detail: "As in Safari. Private tabs keep it on",
-              more: "Off, sites you rarely open keep their sign-ins, and trackers inside other sites can follow you across them again, as in Chrome.",
+              more: "On, as in Safari, a site you mostly reach from a tracker's link (YouTube from Google, GitHub from a sign-in button) can lose its saved preferences, and in time its sign-in, after a week of browsing without a click or typing on it. Off, sites you rarely open keep their sign-ins, and trackers inside other sites can follow you across them again, as in Chrome.",
               keys: ["sites.keep"], words: ["itp", "cookies", "tracking"]),
         .init(id: "privacy.clickIDs", group: "blocking", icon: "scissors",
               title: "Remove click trackers from links", detail: "gclid, fbclid and the like go before the page loads. Private tabs always",
@@ -503,6 +532,10 @@ enum SettingsIndex {
               title: "Tell sites not to sell or share your data", detail: "Global Privacy Control, with every request. Private tabs always",
               more: "Sends Sec-GPC: 1, which some laws make a site honour.",
               keys: ["privacy.gpc"], words: ["gpc", "do not sell", "do not track", "dnt", "global privacy control"]),
+        .init(id: "privacy.httpsFirst", group: "blocking", icon: "lock",
+              title: "Try HTTPS first", detail: "An http:// page loads over HTTPS where the site has it",
+              more: "Where it hasn't, the page loads as asked. Local addresses (localhost, .test, .local, IP addresses) are left as they are.",
+              keys: ["privacy.httpsFirst"], words: ["https", "https only", "https first", "secure", "upgrade", "http"]),
         .init(id: "notifications.ask", group: "permissions", icon: "bell.badge",
               title: "Let sites ask to send notifications", detail: "Only a site you allow reaches your Mac's notifications",
               keys: ["notifications.ask"], words: ["notifications", "alerts", "push"]),
@@ -575,6 +608,9 @@ enum SettingsIndex {
         .init(id: "autocorrect", group: "pages", icon: "textformat.abc.dottedunderline",
               title: "Correct spelling as you type", detail: "Now in Edit › Spelling and Grammar, as in Safari",
               keys: ["autocorrect"], words: ["autocorrect", "spelling", "spell"], findOnly: true),
+        .init(id: "inlinePredictions", group: "pages", icon: "text.cursor",
+              title: "Show inline predictions", detail: "The grey rest of a word as you type; in Edit › Spelling and Grammar",
+              keys: ["inlinePredictions"], words: ["inline", "predictions", "predictive text", "suggestions", "completion", "autocomplete", "autocorrect", "spelling"], findOnly: true),
         .init(id: "note.split", group: "window", icon: "rectangle.split.2x1",
               title: "Split View", detail: "Always there: ⌥-click a tab, drag a tab onto a page, or press ⌥⌘N",
               keys: ["splitView"], words: ["split", "side by side"], kind: .note, findOnly: true),
@@ -625,6 +661,7 @@ enum SettingsIndex {
         switch item.id {
         case "privacy.clickIDs": return ClickIDs.possible
         case "privacy.gpc": return PrivacySignal.possible
+        case "privacy.httpsFirst": return HTTPSFirst.possible
         default: return true
         }
     }
@@ -669,9 +706,9 @@ enum SettingsIndex {
         case "sidebar.foldIcons": return prefs.sidebar && !prefs.sideHides
         case "toolbar.left", "tabs.compact": return !prefs.sidebar
         case "profiles.oneWindow": return Profiles.shared.several
-        case "spaces.links", "links.ask": return prefs.usesSpaces
+        case "spaces.links", "links.ask", "spaces.buttons": return prefs.usesSpaces
         case "tabs.frontBeside": return prefs.newTabPlace == .next
-        case "newtab.recent": return prefs.floatingNewTab
+        case "newtab.recent", "newtab.arc": return prefs.floatingNewTab
         case "links.little.tabs": return prefs.littleLinks
         case "mail.default": return prefs.webmail != .none
         case "links.peek.stays": return prefs.peeksLinks || prefs.pinsPeek
@@ -694,10 +731,10 @@ enum SettingsIndex {
         case "sidebar.foldIcons": return "Only with the column down a side and not hidden until the edge"
         case "icloud.erase": return "Only while Sync with iCloud is on"
         case "profiles.oneWindow": return "Only with more than one profile"
-        case "spaces.links", "links.ask": return "Only with Spaces on"
+        case "spaces.links", "links.ask", "spaces.buttons": return "Only with Spaces on"
         case "sidebar.player": return "Only with titles in the sidebar"
         case "tabs.frontBeside": return "Only with New tab position on After current"
-        case "newtab.recent": return "Only with the new tab in a floating field"
+        case "newtab.recent", "newtab.arc": return "Only with the new tab in a floating field"
         case "links.little.tabs": return "Only with links from other apps in a small window"
         case "mail.default": return "Only with a webmail chosen for email links"
         case "links.peek.stays": return "Only when links or pins open peeks"

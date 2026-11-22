@@ -139,8 +139,12 @@ enum Spaces {
         }
         // The first space is the store and session there were before
         // spaces. A file without it still has to leave that home reachable,
-        // once the profile's other spaces are restored.
-        if !spaces.contains(where: \.isFirst) { spaces.insert(Space.first(), at: 0) }
+        // once the profile's other spaces are restored — unless it was
+        // deleted, and Personal's home is another space of the list now.
+        let home = home(of: Profile.personalID)
+        if !spaces.contains(where: \.isFirst), home == Space.firstID || !spaces.contains(where: { $0.id == home }) {
+            spaces.insert(Space.first(), at: 0)
+        }
         if keepsOrder(in: saved) { return spaces }
         return spaces.filter(\.isFirst) + spaces.filter { !$0.isFirst }
     }
@@ -151,9 +155,7 @@ enum Spaces {
         let saved = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([Space].self, from: $0) } ?? []
         let mine = read().filter { $0.profileID == profile }
         guard !keepsOrder(in: saved) else { return mine }
-        let home = profile == Profile.personalID
-            ? Space.firstID
-            : (Profiles.read().first { $0.id == profile }?.home ?? mine.first?.id ?? Space.firstID)
+        let home = home(of: profile, or: mine.first?.id)
         return mine.filter { $0.id == home } + mine.filter { $0.id != home }
     }
 
@@ -166,12 +168,17 @@ enum Spaces {
         for profile in Set(spaces.map(\.profileID)) {
             let block = spaces.filter { $0.profileID == profile }
             guard let first = block.first else { continue }
-            let home = profile == Profile.personalID
-                ? Space.firstID
-                : (Profiles.read().first { $0.id == profile }?.home ?? first.id)
+            let home = home(of: profile, or: first.id)
             if first.id != home { return true }
         }
         return false
+    }
+
+    /// A profile's home as profiles.json has it: for Personal the first
+    /// space, unless that was deleted (see Browser.deleteSpace).
+    static func home(of profile: UUID, or other: UUID? = nil) -> UUID {
+        Profiles.read().first { $0.id == profile }?.home
+            ?? (profile == Profile.personalID ? Space.firstID : other ?? Space.firstID)
     }
 
     /// The whole list, every profile's spaces.
@@ -225,12 +232,14 @@ enum Spaces {
     }
 
     /// Whether a space is signed out of the others, with a store of its own:
-    /// any but the first space of a profile and the ones made signed in with it.
+    /// any but the first space of a profile and the ones made signed in with
+    /// it. A space that became the home when the first was deleted keeps the
+    /// store it had: one of its own is marked so (sharesSignIns false).
     @MainActor static func ownsStore(_ id: UUID) -> Bool {
         let space = known[id]
         let profile = space?.profileID ?? Profile.personalID
         return !(id == Space.firstID || space?.sharesSignIns == true
-            || (profile != Profile.personalID && Profiles.shared.profile(profile).home == id))
+            || (profile != Profile.personalID && Profiles.shared.profile(profile).home == id && space?.sharesSignIns == nil))
     }
 
     /// The space whose own store this is, if it is one.
@@ -249,6 +258,20 @@ enum Spaces {
         let made = History(file: historyFile(id))
         histories[id] = made
         return made
+    }
+
+    /// Once, the first launch since 1.0.16 gave each signed-out space a
+    /// history of its own (#1166): what its profile's history held, copied
+    /// into each signed-out space there is now. Before, every space saw it
+    /// all, and since, those spaces started empty (#1325). Only the shared
+    /// history is copied, into them: what a signed-out space visited alone
+    /// never goes anywhere else. Spaces made after this start empty.
+    @MainActor static func seedHistories() {
+        guard !Store.settings.bool(forKey: "history.spacesSeeded") else { return }
+        Store.settings.set(true, forKey: "history.spacesSeeded")
+        for space in read() where ownsStore(space.id) {
+            history(for: space.id).takeAll(from: Profiles.history(space.profileID))
+        }
     }
 
     /// Every history a profile's spaces write to: its own, then each
@@ -391,11 +414,16 @@ extension Browser {
     /// profile shown. None with spaces off, and while a new one is being
     /// made, as the dot has.
     var wash: SpaceLook? {
-        prefs.usesSpaces && !makingSpace ? space.look : nil
+        prefs.usesSpaces && !makingSpace ? washSpace.look : nil
     }
 
     /// How strongly the wash is drawn: the space on screen's strength.
-    var washStrength: SpaceStrength { wash == nil ? .subtle : space.washStrength }
+    var washStrength: SpaceStrength { wash == nil ? .subtle : washSpace.washStrength }
+
+    /// The space the wash is of: the one a click is taking you to, already,
+    /// or the one on screen. Waiting for the switch itself, the old colour
+    /// stayed through the slide and the pause after it.
+    var washSpace: Space { spaceHeading.flatMap { id in spaces.first { $0.id == id } } ?? space }
 
     /// The wash's colour, when it is one of the colours rather than a gradient.
     var washColour: Int? {
@@ -416,6 +444,8 @@ extension Browser {
     /// a space of another profile brings that profile's window into this
     /// one's place (see OneWindow.swift).
     func switchSpace(to id: UUID) {
+        // Here now, or somewhere else after all: the wash goes by spaceID again.
+        if spaceHeading != nil { spaceHeading = nil }
         guard prefs.usesSpaces else { return }
         if merges, !spaces.contains(where: { $0.id == id }), Spaces.known[id] != nil {
             Browsers.join(space: id, from: self)
@@ -499,7 +529,9 @@ extension Browser {
         askFocus()
         // Beside the space's icon when the tabs are on screen (SpaceDot);
         // folded away, or with the icon up beside the helm, at the bottom.
-        if folded && !peeking || SideBar.doorsUp(prefs, width: prefs.columnWidth, fullScreen: fullScreen) {
+        // With a button per space there is no dot to say it: at the bottom.
+        if prefs.showsSpaceButtons || folded && !peeking
+            || SideBar.doorsUp(prefs, width: prefs.columnWidth, fullScreen: fullScreen, spaces: SpaceButtons.count(prefs, spaces)) {
             announce(space.name)
         }
     }
@@ -597,6 +629,8 @@ extension Browser {
             SpaceSwipe.shared.land(self)
             return switchSpace(to: id)
         }
+        // Its colour from the click, while its rows are still on their way.
+        withAnimation(Motion.quick) { spaceHeading = id }
         SpaceSwipe.shared.bring(self, id, step: to > here ? 1 : -1)
     }
 
@@ -730,23 +764,48 @@ extension Browser {
         Spaces.write(spaces, profile: profileID)
     }
 
-    /// The profile's first space: the one a window shows with spaces off,
-    /// and the one that can't be deleted. It is identified by its id, not
-    /// the first list position, because the spaces can be reordered.
+    /// The profile's first space: the one a window shows with spaces off.
+    /// It is identified by its id, not the first list position, because the
+    /// spaces can be reordered; one gone from the list falls to the first.
     var homeSpaceID: UUID {
-        profileID == Profile.personalID ? Space.firstID : Profiles.shared.profile(profileID).home
+        let home = Profiles.shared.profile(profileID).home
+        return spaces.contains { $0.id == home } ? home : spaces.first?.id ?? home
     }
 
-    /// A space, its tabs, and its cookies and sign-ins, gone. The first one
-    /// of the profile stays: it is where everything was before there were spaces.
+    /// Whether a space can be deleted: any, as long as the profile keeps
+    /// one. Its last is deleted with the profile (see SpaceMenu).
+    func canDeleteSpace(_ id: UUID) -> Bool {
+        spaces.count > 1 && spaces.contains { $0.id == id }
+    }
+
+    /// A space, its tabs, and its cookies and sign-ins, gone. Any space of
+    /// the profile can go, its home included, as in Arc: the next one in
+    /// the order becomes the home, signed in where it was. A space signed
+    /// in with the others has no store of its own, so nothing is erased.
     func deleteSpace(_ id: UUID) {
-        guard id != Space.firstID, id != homeSpaceID, let at = spaces.firstIndex(where: { $0.id == id }) else { return }
-        if spaceID == id { switchSpace(to: homeSpaceID) }
+        guard canDeleteSpace(id) else { return }
+        // Asked before the list changes: whether its store is its own or
+        // the profile's, which stays.
+        let shared = !Spaces.ownsStore(id)
+        let home = homeSpaceID
+        let next = spaces.first { $0.id != id }?.id ?? home
+        if spaceID == id { switchSpace(to: id == home ? next : home) }
         closeParkedSpace(id)
-        let shared = spaces[at].sharesSignIns == true
-        spaces.remove(at: at)
+        if id == home, let at = spaces.firstIndex(where: { $0.id == next }) {
+            // A space from before the sign-in choice has a store of its own:
+            // said so now, for it to keep it as the home.
+            if spaces[at].sharesSignIns == nil { spaces[at].sharesSignIns = false }
+            Profiles.shared.rehome(profileID, to: next)
+        }
+        spaces.removeAll { $0.id == id }
         Spaces.write(spaces, profile: profileID)
-        Session.erase(space: id)
+        // The first space's session is the one there was before spaces:
+        // emptied rather than removed.
+        if id == Space.firstID {
+            Session.write(now: true, space: id, Session.Shape(tabs: [], active: 0))
+        } else {
+            Session.erase(space: id)
+        }
         // Gone from the other windows too: their rows there, and the space
         // itself if one was showing it (the list's change moves it).
         for other in Browsers.all where other !== self { other.forget(space: id) }
@@ -896,6 +955,74 @@ struct SpaceDot: View {
     }
 }
 
+/// Every space as a button of its own, beside the bookmarks: one click to
+/// any of them, where the dot took a click and a pick from its menu. The
+/// one on screen is marked, and a click on it opens the dot's menu, so New
+/// Space… and the rest stay a click away from here too. In the spaces'
+/// own order, the swipe's and ⌃1–⌃9's, so a button never moves when you
+/// switch. They stand in for the dot, with Settings › Spaces › One
+/// button per space (Preferences.spaceButtons).
+struct SpaceButtons: View {
+    @ObservedObject var browser: Browser
+    /// One above the other, in the column of icons.
+    var vertical = false
+
+    /// How many buttons are drawn, for the foot to make room for them.
+    /// One space still has its button: it is the way to the menu, and to
+    /// New Space…, now that the dot is gone.
+    @MainActor static func count(_ prefs: Preferences, _ spaces: [Space]) -> Int {
+        prefs.showsSpaceButtons ? spaces.count : 0
+    }
+
+    var body: some View {
+        if SpaceButtons.count(browser.prefs, browser.spaces) > 0 {
+            let layout = vertical ? AnyLayout(VStackLayout(spacing: 2)) : AnyLayout(HStackLayout(spacing: 2))
+            layout {
+                ForEach(Array(browser.spaces.enumerated()), id: \.element.id) { index, space in
+                    SpaceButton(browser: browser, space: space, index: index, current: space.id == (browser.spaceHeading ?? browser.spaceID))
+                }
+            }
+        }
+    }
+}
+
+private struct SpaceButton: View {
+    let browser: Browser
+    let space: Space
+    let index: Int
+    let current: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            if current { SpaceMenu.show(for: browser) } else { browser.goToSpace(space.id) }
+        } label: {
+            Image(systemName: space.symbol)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(space.tint ?? (current || hovering ? Palette.ink : Palette.muted))
+                .opacity(current || hovering ? 1 : 0.75)
+                .frame(width: 26, height: 26)
+                .background(
+                    // The one on screen on a wash, of its colour if it has one.
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(current
+                              ? (space.tint.map { $0.opacity(0.18) } ?? Palette.hover)
+                              : (hovering ? Palette.hover : .clear))
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Motion.quick, value: hovering)
+        .animation(Motion.quick, value: current)
+        .help(current
+              ? "\(space.name) — click for the space’s menu"
+              : (index < 9 ? "\(space.name) — \(KeyCombo.spacesOnCommand ? "⌘" : "⌃")\(index + 1)" : space.name))
+        .accessibilityLabel(space.name)
+        .accessibilityAddTraits(current ? .isSelected : [])
+    }
+}
+
 /// The dot's menu: the spaces, then what can be done to the one on screen.
 @MainActor
 enum SpaceMenu {
@@ -983,10 +1110,20 @@ enum SpaceMenu {
             // Once the menu has gone: a popover shown while it tracks closes with it.
             DispatchQueue.main.async { SpaceLookPopover.show(for: browser) }
         })
-        // The order is the swipe's, and ⌃1–⌃9's.
+        // The order is the swipe's, and ⌃1–⌃9's. With profiles in one
+        // window, past its profile's first or last space the move takes the
+        // whole profile past the one beside it, so any profile can come first.
         if let at = browser.spaces.firstIndex(where: { $0.id == here.id }) {
-            if at > 0 { menu.addItem(item("Move Left") { browser.moveSpace(here.id, to: at - 1) }) }
-            if at < browser.spaces.count - 1 { menu.addItem(item("Move Right") { browser.moveSpace(here.id, to: at + 1) }) }
+            if at > 0 {
+                menu.addItem(item("Move Left") { browser.moveSpace(here.id, to: at - 1) })
+            } else if browser.profileBeyond(-1) != nil {
+                menu.addItem(item("Move Left") { Profiles.shared.move(browser.profileID, by: -1) })
+            }
+            if at < browser.spaces.count - 1 {
+                menu.addItem(item("Move Right") { browser.moveSpace(here.id, to: at + 1) })
+            } else if browser.profileBeyond(1) != nil {
+                menu.addItem(item("Move Right") { Profiles.shared.move(browser.profileID, by: 1) })
+            }
         }
         // Every group of this space, folded or opened at once, as in Arc.
         if browser.prefs.usesTabGroups, !browser.tabGroups.isEmpty {
@@ -1013,11 +1150,27 @@ enum SpaceMenu {
         let downloads = NSMenuItem(title: "Downloads", action: nil, keyEquivalent: "")
         downloads.submenu = places
         menu.addItem(downloads)
-        if !here.isFirst, here.id != browser.homeSpaceID {
+        if browser.canDeleteSpace(here.id) {
             menu.addItem(.separator())
+            // Signed in with the others, it has no cookies of its own to erase.
+            let own = Spaces.ownsStore(here.id)
             menu.addItem(item("Delete “\(here.name)”…") {
-                Ask.sure("Delete “\(here.name)”?", detail: "Its tabs close, and its cookies and sign-ins are erased from this Mac. History and bookmarks stay.", confirm: "Delete") {
+                Ask.sure("Delete “\(here.name)”?",
+                         detail: own ? "Its tabs close, and its cookies and sign-ins are erased from this Mac. History and bookmarks stay."
+                                     : "Its tabs and pins close. Your sign-ins, history and bookmarks stay.",
+                         confirm: "Delete") {
                     browser.deleteSpace(here.id)
+                }
+            })
+        } else if browser.spaces.count == 1, browser.profileID != Profile.personalID {
+            // A profile's last space goes with the profile.
+            let profile = Profiles.shared.profile(browser.profileID)
+            menu.addItem(.separator())
+            menu.addItem(item("Delete Profile “\(profile.name)”…") {
+                Ask.sure("Delete “\(profile.name)”?",
+                         detail: "“\(here.name)” is its last space. The profile's windows close, its spaces go with their tabs and pins, and its cookies, sign-ins, history and bookmarks are erased from this Mac.",
+                         confirm: "Delete", returnCancels: true) {
+                    Profiles.shared.delete(profile.id)
                 }
             })
         }

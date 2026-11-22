@@ -22,6 +22,10 @@ import WebKit
 
 @MainActor
 final class Bench {
+    /// The bookmark button's list held off screen for `dropdown popover`.
+    static var dropdownHeld: NSViewController?
+    static var dropdownMade: (ms: Double, rows: Int) = (0, 0)
+
     static let shared = Bench()
     /// The column's edge held at a width by "edgetime", or let go (nil).
     static let edgeHeld = Notification.Name("search.bench.edgeHeld")
@@ -343,6 +347,17 @@ final class Bench {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
                 record.stop()
                 answer(["layouts": record.seen])
+            }
+
+        case "pointerlock":
+            // WebKit's question whether a page may have the pointer, asked as
+            // WebKit asks it (PointerLock): a hidden probe's page is never
+            // focused, so WebKit refuses it before Search is asked at all.
+            // The page's own click, and so the gesture, are real (tap).
+            guard Store.testing else { answer(["error": "pointerlock is for test runs"]); return }
+            guard let tab = find(request, in: browser) else { answer(missing(request)); return }
+            browser.askedForPointerLock(tab.web) { given in
+                answer(["given": given, "answered": PointerLock.shared.answered])
             }
 
         case "tabs":
@@ -1107,10 +1122,20 @@ final class Bench {
                             "windowFullScreen": (browser.window ?? Links.window)?.styleMask.contains(.fullScreen) ?? false]
             out["lightsHidden"] = Fold.titlebar?.isHidden ?? false
             out["siteCard"] = SiteCardPanel.isShown
+            out["siteCardFrames"] = SiteCardPanel.geometry(browser)
+            // The row across the top: its tabs as laid out, the run shown
+            // (narrower only when it scrolls), and whether it scrolls.
+            out["topRun"] = ["tabs": Double(TabBar.laidOut), "run": Double(TabBar.runShown), "scrolls": TabBar.scrolls]
+            out["tabEditing"] = browser.editingTab.map { String($0.uuidString.prefix(8)).lowercased() } ?? ""
             // "Press Esc again to leave full screen", up over a page filling
             // the screen (Settings › General › Press Esc twice to leave full
             // screen).
             out["escapeReminder"] = FullScreenEscape.shared.showing
+            // A page asking for the pointer (PointerLock): the last answer,
+            // whether a page holds it, and whether "Press Esc to show your
+            // pointer" is up.
+            out["pointerLock"] = ["answered": PointerLock.shared.answered, "asked": PointerLock.shared.asked,
+                                  "held": PointerLock.shared.page != nil, "hint": PointerLock.shared.showing]
             // Whether this Mac lets the browser use its passkeys at all — the
             // one-time permission macOS asks a browser other than Safari for.
             switch ASAuthorizationWebBrowserPublicKeyCredentialManager().authorizationStateForPlatformCredentials {
@@ -1277,6 +1302,10 @@ final class Bench {
                 DispatchQueue.main.asyncAfter(deadline: .now() + interval) { walk(n + 1) }
             }
             walk(0)
+
+        case "foldframes":
+            guard Store.testing else { answer(["error": "foldframes is for test runs"]); return }
+            FoldFrames.run(browser, request, answer)
 
         case "foldtime":
             // ⌘S, timed: each pass of the main run loop for the next 0.7 s,
@@ -1675,9 +1704,13 @@ final class Bench {
                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks,
                                        pressure: type == .leftMouseUp ? 0 : 1)
                 }
-                for clicks in [1, 2] {
-                    if let down = event(.leftMouseDown, clicks) { hit?.mouseDown(with: down) }
-                    if let up = event(.leftMouseUp, clicks) { hit?.mouseUp(with: up) }
+                if let strip = hit as? DragStrip.Strip {
+                    strip.performDoubleClick(at: strip.convert(point, from: nil))
+                } else {
+                    for clicks in [1, 2] {
+                        if let down = event(.leftMouseDown, clicks) { hit?.mouseDown(with: down) }
+                        if let up = event(.leftMouseUp, clicks) { hit?.mouseUp(with: up) }
+                    }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     let after = window.frame
@@ -1850,6 +1883,11 @@ final class Bench {
                     "on": browser.prefs.engineSuggests, "shy": browser.active?.shy ?? false,
                     "address": browser.active?.address?.absoluteString ?? "",
                     "pending": browser.active?.pending?.absoluteString ?? "",
+                    // The row Return takes, or -1 for what was typed.
+                    "picked": browser.picked ?? -1,
+                    // What the field shows: what was typed and its grey ending,
+                    // or the row walked to.
+                    "completed": browser.completed,
                 ]
                 out.merge(extra) { _, new in new }
                 return out
@@ -1943,6 +1981,42 @@ final class Bench {
             // The bookmark button's list, laid out off every screen, never in
             // a popover: its height as it opens, the list's part of it, and
             // how tall the tree is with every folder open.
+            // "popover": the list in the controller a popover is given, off
+            // every screen, and the size it asks its popover for (a SwiftUI
+            // popover follows its controller's preferred size); with a
+            // folder's name, that folder opened or closed in it first, as a
+            // click on its row does; "close" lets it go. A hidden probe's
+            // window never puts a real popover up. Only on a SEARCH_PROBE run.
+            if let what = request["popover"] as? String {
+                guard Store.testing else { answer(["error": "dropdown popover only works on a --test run"]); return }
+                switch what {
+                case "open":
+                    // How long the list took to be made and laid out, and how
+                    // many of its rows were built for it (idea 879).
+                    Bench.bodies["bookmarkRow"] = 0
+                    let start = CACurrentMediaTime()
+                    let held = NSHostingController(rootView: BookmarksDropdown(browser: browser, bookmarks: browser.bookmarks))
+                    held.sizingOptions = [.preferredContentSize]
+                    _ = held.view
+                    held.view.layoutSubtreeIfNeeded()
+                    held.view.frame.size = held.preferredContentSize
+                    held.view.layoutSubtreeIfNeeded()
+                    held.view.displayIfNeeded()
+                    Bench.dropdownMade = ((CACurrentMediaTime() - start) * 1000, Bench.bodies["bookmarkRow"] ?? 0)
+                    Bench.dropdownHeld = held
+                case "close": Bench.dropdownHeld = nil
+                default:
+                    if let folder = Bookmarks.folders(browser.bookmarks.roots).first(where: { $0.node.title == what }) {
+                        BookmarksDropdown.benchToggle.send(folder.node.id)
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    Bench.dropdownHeld?.view.layoutSubtreeIfNeeded()
+                    answer(["popover": Double(Bench.dropdownHeld?.preferredContentSize.height ?? 0),
+                            "madeMs": Bench.dropdownMade.ms, "rowsBuilt": Bench.dropdownMade.rows])
+                }
+                return
+            }
             let dropdown = BookmarksDropdown(browser: browser, bookmarks: browser.bookmarks)
             let whole = NSHostingView(rootView: dropdown).fittingSize
             let all = Set(Bookmarks.folders(browser.bookmarks.roots).map(\.node.id))
@@ -1959,6 +2033,7 @@ final class Bench {
                 .padding(6)
                 .frame(width: 280)
             answer(["height": Double(whole.height), "width": Double(whole.width), "list": Double(dropdown.listHeight),
+                    "listAllOpen": Double(BookmarksDropdown.listHeight(browser.bookmarks.roots, open: nil)),
                     "allOpen": Double(NSHostingView(rootView: outline).fittingSize.height),
                     "closed": Double(NSHostingView(rootView: closed).fittingSize.height),
                     "shown": Double(NSHostingView(rootView: shown).fittingSize.height),
@@ -1989,7 +2064,12 @@ final class Bench {
                 ["folder": folder.title, "items": BookmarkMenu.shared.walk(folder).map { line($0.depth, $0.item) }]
             }
             var menu: [[String: Any]] = []
-            if let main = NSApp.mainMenu?.items.first(where: { $0.title == "Bookmarks" })?.submenu {
+            if let bar = NSApp.mainMenu, let main = bar.items.first(where: { $0.title == "Bookmarks" })?.submenu {
+                // The bookmarks go in only while the menu bar is in use
+                // (#1137): told it is, as a click on it would, and let go
+                // of after.
+                NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: bar)
+                defer { NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: bar) }
                 main.delegate?.menuNeedsUpdate?(main)
                 func down(_ items: [NSMenuItem], _ depth: Int) {
                     for item in items where item.tag == 0x5EAC && !item.isSeparatorItem {
@@ -2343,9 +2423,12 @@ final class Bench {
                     // Edit › Spelling and Grammar › Correct Spelling
                     // Automatically, as its Toggle sets it.
                     browser.prefs.autocorrect.toggle()
+                } else if name == "predictions" {
+                    // Edit › Spelling and Grammar › Show Inline Predictions.
+                    browser.prefs.inlinePredictions.toggle()
                 } else {
                     guard let kind = Substitution(rawValue: name) else {
-                        answer(["error": "toggle quotes|dashes|replacement|autocorrect"]); return
+                        answer(["error": "toggle quotes|dashes|replacement|autocorrect|predictions"]); return
                     }
                     browser.toggleSubstitution(kind, in: web)
                 }
@@ -2386,7 +2469,27 @@ final class Bench {
                     "kept": domain[Preferences.autocorrectKey] ?? NSNull(),
                     "setting": browser.prefs.autocorrect, "menu": tick,
                 ]
-                answer(["mac": mac, "page": page, "kept": kept, "menu": items, "web": web != nil, "autocorrect": autocorrect])
+                // Inline predictions: whether the page's view would show one
+                // at the caret now (WebKit asks AppKit), the default kept,
+                // the setting, the menu's tick.
+                var shows: Any = NSNull()
+                let allows = NSSelectorFromString("_allowsInlinePredictions")
+                if let web, web.responds(to: allows) {
+                    typealias Ask = @convention(c) (AnyObject, Selector) -> Bool
+                    shows = unsafeBitCast(web.method(for: allows), to: Ask.self)(web, allows)
+                }
+                var predictsTick: Any = NSNull()
+                if let edit = NSApp.mainMenu?.items.first(where: { $0.title == "Edit" })?.submenu,
+                   let item = edit.items.first(where: { $0.title == "Spelling and Grammar" })?.submenu?
+                       .items.first(where: { $0.title == "Show Inline Predictions" }) {
+                    predictsTick = item.state == .on
+                }
+                let predictions: [String: Any] = [
+                    "page": shows, "kept": domain[Preferences.inlinePredictionsKey] ?? NSNull(),
+                    "setting": browser.prefs.inlinePredictions, "menu": predictsTick,
+                ]
+                answer(["mac": mac, "page": page, "kept": kept, "menu": items, "web": web != nil,
+                        "autocorrect": autocorrect, "predictions": predictions])
             }
 
         case "menu":
@@ -3553,6 +3656,35 @@ final class Bench {
                 }
             }
 
+        case "animating":
+            // What in the window keeps animating while nothing else moves:
+            // every layer carrying a Core Animation animation, and whether
+            // it is shown — none of it, nor any layer over it, hidden or
+            // wholly transparent — and runs for ever, as a loading tab's
+            // ring does. A shown one draws the window again at every frame
+            // for as long as it runs (idea 847). Test runs only.
+            guard Store.testing else { answer(["error": "animating only works on a --test run"]); return }
+            guard let root = (browser.window ?? Links.window)?.contentView?.superview?.layer
+            else { answer(["error": "no window"]); return }
+            var found: [[String: Any]] = []
+            func walk(_ layer: CALayer, shown: Bool) {
+                let shown = shown && !layer.isHidden && layer.opacity > 0
+                if let keys = layer.animationKeys(), !keys.isEmpty {
+                    let forever = keys.contains { key in
+                        guard let animation = layer.animation(forKey: key) else { return false }
+                        return animation.repeatCount > 1e6 || animation.repeatDuration > 1e6 || animation.duration > 1e6
+                    }
+                    let place = layer.convert(layer.bounds, to: root)
+                    found.append(["keys": keys, "shown": shown, "forever": forever,
+                                  "x": Int(place.minX), "y": Int(place.minY),
+                                  "width": Int(place.width), "height": Int(place.height)])
+                }
+                for sublayer in layer.sublayers ?? [] { walk(sublayer, shown: shown) }
+            }
+            walk(root, shown: true)
+            answer(["animations": found,
+                    "shownForever": found.filter { $0["shown"] as? Bool == true && $0["forever"] as? Bool == true }.count])
+
         case "film" where ["float", "land"].contains(request["action"] as? String ?? ""):
             // The video going out into its floating window, or back into its
             // tab (#257), recorded by the page itself on every frame it
@@ -3964,6 +4096,20 @@ final class Bench {
             default: break
             }
             answer(["before": before, "after": Consent.given])
+
+        case "clientcert":
+            // A site's certificate question in a test run (ClientCertificates):
+            // "answer" sets what the next pickers choose — the identity at
+            // `index`, or none (cancelled); "forget" drops this launch's
+            // choices. Always the pickers so far and the sites remembered.
+            guard Store.testing else { answer(["error": "clientcert only works on a --test run"]); return }
+            switch request["action"] as? String {
+            case "answer": ClientCertificates.answerInTest = request["index"] as? Int
+            case "forget": ClientCertificates.chosen.removeAll()
+            default: break
+            }
+            answer(["asked": ClientCertificates.askedInTest, "chosen": ClientCertificates.chosen.keys.map { String($0.split(separator: " ").last ?? "") }.sorted(),
+                    "open": browser.certificateAsks.filter(\.open).count])
 
         case "fold":
             // The strip or the column as it comes out over the page once
@@ -4532,7 +4678,8 @@ final class Bench {
                 "every": browser.everySpace.map(\.name),
                 "on": browser.prefs.usesSpaces,
                 "current": browser.space.name,
-                "spaces": browser.spaces.map { ["name": $0.name, "id": $0.id.uuidString, "downloads": $0.downloads ?? "", "shared": $0.sharesSignIns == true] },
+                "home": browser.homeSpaceID.uuidString,
+                "spaces": browser.spaces.map { ["name": $0.name, "id": $0.id.uuidString, "downloads": $0.downloads ?? "", "shared": $0.sharesSignIns == true, "own": Spaces.ownsStore($0.id)] },
                 "parked": browser.parked.map { [$0.key.uuidString: $0.value.tabs.count] },
                 "tabs": browser.tabs.count,
                 "making": browser.makingSpace,
@@ -4685,6 +4832,10 @@ final class Bench {
             // The window's own full screen as the chrome sees it, without
             // the window going there: a test run never takes the screen.
             if let on = request["fullscreen"] as? Bool, Store.testing { browser.fullScreen = on }
+            // What macOS's menu bar brought down takes of the window's top in
+            // full screen, as the window would say it (FullScreenReveal),
+            // set without the window going there.
+            if let inset = request["reveal"] as? Double, Store.testing { browser.revealInset = CGFloat(inset) }
             if let on = request["peek"] as? Bool { browser.peeking = on }
             // Settings › Keyboard & Mouse › Peek stays with its tab, moved as
             // its switch moves it.
@@ -4701,6 +4852,12 @@ final class Bench {
                 browser.beginTabEdit(tab)
                 browser.tabDraft = text
             }
+            // Every group heading measured this much narrower than it is
+            // drawn, as another macOS's fonts can make it (TabBar.measures).
+            if let short = request["headingShortfall"] as? Double, Store.testing { GroupHeading.testShortfall = CGFloat(short) }
+            // The tab on screen clicked again: its address opened, as typed
+            // into nothing yet, the site card under it.
+            if request["opentab"] as? Bool == true, let tab = browser.active { browser.beginTabEdit(tab) }
             if request["finishedit"] as? Bool == true { browser.finishTabEdit() }
             if #available(macOS 15.4, *), let on = request["extensions"] as? Bool { Extensions.shared.menuOpen = on }
             // Settings › Privacy › Clear › Cache, answered once every store

@@ -47,7 +47,6 @@ struct SideBar: View {
     /// two different axes.
     /// The neighbouring spaces' own grey, apart from this one's.
     @Namespace private var before
-    @Namespace private var after
 
     @State private var groupFrames: [UUID: GroupDropFrame] = [:]
     @State private var looseFrames = LooseFrames()
@@ -113,9 +112,9 @@ struct SideBar: View {
     /// The room right of the helm at the width let go at, for the doors up
     /// there: how many pinned extensions show, not changing under the pointer.
     private var upRoom: CGFloat {
-        max(SideBar.beyondHelm(prefs.columnWidth, fullScreen: browser.fullScreen), SideFoot.keptWidth(prefs))
+        max(SideBar.beyondHelm(prefs.columnWidth, fullScreen: browser.fullScreen), SideFoot.keptWidth(prefs, spaces: SpaceButtons.count(prefs, browser.spaces)))
     }
-    private var doorsUp: Bool { SideBar.doorsUp(prefs, width: width, fullScreen: browser.fullScreen) }
+    private var doorsUp: Bool { SideBar.doorsUp(prefs, width: width, fullScreen: browser.fullScreen, spaces: SpaceButtons.count(prefs, browser.spaces)) }
     /// Where the doors are: up in the lights' row or down at the foot. Not
     /// doorsUp itself: while the edge is held, the doors up there stay up as
     /// it pushes them under the helm, and only go once they are under it
@@ -153,9 +152,9 @@ struct SideBar: View {
     /// with titles, and only where the doors that always show fit there —
     /// downloads counted whether running or not, so a download starting
     /// doesn't send them all back down.
-    @MainActor static func doorsUp(_ prefs: Preferences, width: CGFloat, fullScreen: Bool) -> Bool {
+    @MainActor static func doorsUp(_ prefs: Preferences, width: CGFloat, fullScreen: Bool, spaces: Int = 0) -> Bool {
         prefs.doorsUp && prefs.sidebar && !prefs.iconColumn
-            && beyondHelm(width, fullScreen: fullScreen) >= SideFoot.keptWidth(prefs)
+            && beyondHelm(width, fullScreen: fullScreen) >= SideFoot.keptWidth(prefs, spaces: spaces)
     }
 
     var body: some View {
@@ -1052,12 +1051,19 @@ struct SideBar: View {
     /// over, or beside the row it is over — rather than moving along as it
     /// goes; a mark shows where.
     private var foldered: some View {
-        let lines = browser.pinRowLines()
+        // A split pinned whole is one line, drawn at its first page.
+        let lines = browser.pinRowLines().filter { line in
+            if case .pin(let tab, _) = line { return browser.standsInRow(tab) }
+            return true
+        }
         if Store.testing { SideBar.drawnPinLines = lines.map(\.described) }
         let heading = PinFolderHeading.height(prefs, compact: icons)
         let lineSteps = lines.map { line -> CGFloat in
-            if case .folder = line { return heading + SideBar.gap }
-            return rowHeight + SideBar.gap
+            switch line {
+            case .folder: return heading + SideBar.gap
+            case .pin(let tab, _): return rowHeight * CGFloat(browser.split(for: tab)?.tabs.count ?? 1) + SideBar.gap
+            case .item: return rowHeight + SideBar.gap
+            }
         }
         let drop = folderDrop
         let move = folderMove
@@ -1091,18 +1097,10 @@ struct SideBar: View {
                             pinLineFrames.rects[item.id] = $0
                         }
                 case .pin(let tab, let depth):
-                    Group {
-                        if icons {
-                            IconTile(browser: browser, prefs: prefs, tab: tab,
-                                     live: tab.id == browser.activeID, pill: pill,
-                                     close: { browser.close(tab) })
-                        } else {
-                            SideRow(browser: browser, prefs: prefs, tab: tab,
-                                    live: tab.id == browser.activeID, pill: pill,
-                                    close: { browser.close(tab) })
-                                .padding(.leading, CGFloat(depth) * PinFolderHeading.indent)
-                        }
-                    }
+                    // A split pinned whole as a split, as among the tabs.
+                    rowItem(tab, tabs: browser.tabs, splits: browser.splits, activeID: browser.activeID,
+                            interactive: true, pill: pill, close: { browser.close(tab) })
+                        .padding(.leading, icons ? 0 : CGFloat(depth) * PinFolderHeading.indent)
                     .overlay(alignment: drop?.after == true ? .bottom : .top) {
                         if let drop, drop.anchor == tab.id {
                             PinFolderMark().offset(y: (drop.after ? 1 : -1) * (SideBar.gap / 2 + 1))
@@ -1210,7 +1208,8 @@ struct SideBar: View {
 
     /// The pinned rows as they always were, with no folder to draw.
     private var flatListed: some View {
-        let pins = browser.listedPins
+        // A split pinned whole is one row, drawn at its first page.
+        let pins = browser.listedPins.filter { browser.standsInRow($0) }
         let squares = browser.squarePins.count
         let ghost: Int? = if case .listed(let at)? = crossing?.target { at } else { nil }
         let pinSteps = steps(pins)
@@ -1219,17 +1218,8 @@ struct SideBar: View {
                 if ghost == index, let carried = crossingTab {
                     RowGhost(tab: carried, height: rowHeight, size: prefs.sideTitle)
                 }
-                Group {
-                    if icons {
-                        IconTile(browser: browser, prefs: prefs, tab: tab,
-                                 live: tab.id == browser.activeID, pill: pill,
-                                 close: { browser.close(tab) })
-                    } else {
-                        SideRow(browser: browser, prefs: prefs, tab: tab,
-                                live: tab.id == browser.activeID, pill: pill,
-                                close: { browser.close(tab) })
-                    }
-                }
+                rowItem(tab, tabs: browser.tabs, splits: browser.splits, activeID: browser.activeID,
+                        interactive: true, pill: pill, close: { browser.close(tab) })
                     .modifier(Carried(index: index, steps: pinSteps, vertical: true,
                                       space: "listed",
                                       cross: { cross(tab, $0, from: .listed) },
@@ -1442,7 +1432,8 @@ struct SideBar: View {
         case .none:
             return nil
         case .squares:
-            let takes = tab.pin == nil ? browser.pinsByDrag(tab) : (rowsOn && tab.listed)
+            // A split, pinned or not, goes among the rows only.
+            let takes = (tab.pin == nil ? browser.pinsByDrag(tab) : (rowsOn && tab.listed)) && browser.split(for: tab) == nil
             guard takes else { return nil }
             let origin = gridShown ? frames.grid?.origin ?? .zero : .zero
             let slot = PinDrop.gridSlot(CGPoint(x: point.x - origin.x, y: point.y - origin.y),
@@ -1541,7 +1532,7 @@ struct SideBar: View {
     /// one above the other.
     private var footHeight: CGFloat {
         if !doorsFoot { return 10 }
-        return icons ? CGFloat(SideFoot.doors(prefs, browser.fetches, hanging: browser.downloadsHanging)) * 28 + 8 : SideBar.footBox
+        return icons ? CGFloat(SideFoot.doors(prefs, browser.fetches, hanging: browser.downloadsHanging, spaces: SpaceButtons.count(prefs, browser.spaces))) * 28 + 8 : SideBar.footBox
     }
     /// Between what plays in another tab and the foot's doors.
     private static let playerGap: CGFloat = 4
@@ -1572,7 +1563,7 @@ struct SideBar: View {
         guard !icons else { return }
         guard prefs.doorsUp, prefs.sidebar else { drawnUp = nil; return }
         let up: Bool
-        let kept = SideFoot.keptWidth(prefs)
+        let kept = SideFoot.keptWidth(prefs, spaces: SpaceButtons.count(prefs, browser.spaces))
         if doorsTop || live == nil {
             up = doorsUp
         } else {
@@ -1618,7 +1609,8 @@ private struct SideFoot: View {
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
                 ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0)
                 BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
-                if prefs.usesSpaces { SpaceDot(browser: browser) }
+                SpaceButtons(browser: browser, vertical: true)
+                if prefs.usesSpaces && !prefs.showsSpaceButtons { SpaceDot(browser: browser) }
                 if Profiles.shared.several { ProfileBadge(browser: browser) }
             }
             .frame(maxWidth: .infinity)
@@ -1630,30 +1622,36 @@ private struct SideFoot: View {
             // over the helm.
             HStack(spacing: 2) {
                 if Profiles.shared.several { ProfileBadge(browser: browser) }
-                if prefs.usesSpaces { SpaceDot(browser: browser, names: false) }
+                if prefs.usesSpaces && !prefs.showsSpaceButtons { SpaceDot(browser: browser, names: false) }
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: .bottom)
                 BookmarkDoor(browser: browser, arrowEdge: .bottom)
+                SpaceButtons(browser: browser)
                 ExtensionSlot(browser: browser, edge: .bottom, room: room)
             }
         } else {
             HStack(spacing: 2) {
                 if Profiles.shared.several { ProfileBadge(browser: browser) }
-                if prefs.usesSpaces { SpaceDot(browser: browser) }
+                if prefs.usesSpaces && !prefs.showsSpaceButtons { SpaceDot(browser: browser) }
                 ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: room)
                 BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
+                SpaceButtons(browser: browser)
                 // Only while a download is running, and a moment after.
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
-                Spacer(minLength: 0)
+                // With a button per space the row is centred under the
+                // column: at one side, a row of spaces read as a toolbar
+                // that had slid off. Otherwise at the side, as it always was.
+                if !prefs.showsSpaceButtons { Spacer(minLength: 0) }
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
         }
     }
 
     /// How many doors the foot has, stacked: what the rows stop short of.
-    @MainActor static func doors(_ prefs: Preferences, _ fetches: Fetches, hanging: Bool = false) -> Int {
-        var kept = 2  // the puzzle and bookmarks
-        if prefs.usesSpaces { kept += 1 }
+    @MainActor static func doors(_ prefs: Preferences, _ fetches: Fetches, hanging: Bool = false, spaces: Int = 0) -> Int {
+        var kept = 2 + spaces  // the puzzle, bookmarks and a button per space (SpaceButtons)
+        if prefs.usesSpaces && !prefs.showsSpaceButtons { kept += 1 }  // the dot
         if Profiles.shared.several { kept += 1 }
         if FetchDoor.shows(fetches, prefs, hanging: hanging) { kept += 1 }
         return kept
@@ -1661,9 +1659,9 @@ private struct SideFoot: View {
 
     /// The doors that always show, and downloads, side by side: what the
     /// lights' row must have to take them (SideBar.doorsUp).
-    @MainActor static func keptWidth(_ prefs: Preferences) -> CGFloat {
-        var kept = 3  // the puzzle, bookmarks and downloads
-        if prefs.usesSpaces { kept += 1 }
+    @MainActor static func keptWidth(_ prefs: Preferences, spaces: Int = 0) -> CGFloat {
+        var kept = 3 + spaces  // the puzzle, bookmarks, downloads and a button per space
+        if prefs.usesSpaces && !prefs.showsSpaceButtons { kept += 1 }  // the dot
         if Profiles.shared.several { kept += 1 }
         return CGFloat(kept) * (26 + 2) - 2
     }
@@ -1672,8 +1670,8 @@ private struct SideFoot: View {
     /// is 26 points, with 2 between them.
     private var room: Int {
         let door: CGFloat = 26 + 2
-        var kept = 2  // the puzzle and bookmarks
-        if prefs.usesSpaces { kept += 1 }
+        var kept = 2 + SpaceButtons.count(prefs, browser.spaces)  // the puzzle, bookmarks and the spaces' buttons
+        if prefs.usesSpaces && !prefs.showsSpaceButtons { kept += 1 }  // the dot
         if Profiles.shared.several { kept += 1 }
         // Up, downloads keep their place whether running or not.
         if up || FetchDoor.shows(fetches, prefs, hanging: browser.downloadsHanging) { kept += 1 }
@@ -2325,6 +2323,9 @@ struct Door: View {
     /// What holding the button down opens, as Back and Forward list the
     /// pages that way. Nil, or a nil menu, and a hold is just a slow click.
     var held: (() -> NSMenu?)? = nil
+    /// Moves the symbol sideways in its button, for one whose ink isn't
+    /// centred in its own box: the puzzle's weighs almost a point left.
+    var nudge: CGFloat = 0
     let act: () -> Void
 
     @State private var hovering = false
@@ -2339,6 +2340,7 @@ struct Door: View {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(on ? Palette.ink : (hovering ? Palette.ink.opacity(0.7) : Palette.muted))
+                .offset(x: nudge)
                 .frame(width: 26, height: 26)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)

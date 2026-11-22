@@ -92,13 +92,6 @@ enum SidebarPosition: String, CaseIterable, Identifiable {
     case left, right
 
     var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .left: return "Left"
-        case .right: return "Right"
-        }
-    }
 }
 
 /// Where the tabs go when the settings have no line for it. Down the side,
@@ -195,6 +188,25 @@ final class Preferences: ObservableObject {
         didSet {
             store.set(look.rawValue, forKey: "look")
             look.apply()
+        }
+    }
+    /// The painted wall behind the blank tab (see HomeTheme). Off unless chosen.
+    @Published var homeTheme: HomeTheme {
+        didSet { store.set(homeTheme.rawValue, forKey: "home.theme") }
+    }
+    /// The sliders and colours behind it: intensity, density, scale, pack.
+    @Published var homeTuning: HomeTuning {
+        didSet { store.set(homeTuning.text, forKey: "home.tuning") }
+    }
+    /// A different wall or sticker pack each day, from the chosen family.
+    @Published var homeShuffle: Bool {
+        didSet { store.set(homeShuffle, forKey: "home.shuffle") }
+    }
+    /// Where the chosen picture's copy lives, for the image theme.
+    @Published var homeThemeImage: String? {
+        didSet {
+            if let homeThemeImage { store.set(homeThemeImage, forKey: "home.theme.image") }
+            else { store.removeObject(forKey: "home.theme.image") }
         }
     }
     /// Titles down a side instead of across the top.
@@ -404,6 +416,11 @@ final class Preferences: ObservableObject {
     @Published var closeGoesBack: Bool {
         didSet { store.set(closeGoesBack, forKey: "tabs.closeGoesBack") }
     }
+    /// A blank tab shows the sites of the bookmark folder called Home
+    /// (HomeGrid.swift). Off unless asked for.
+    @Published var homeGrid: Bool {
+        didSet { store.set(homeGrid, forKey: "home.grid") }
+    }
     /// ⌘Z reopens the tab just closed, as in Safari, while closing it is
     /// still the last thing done (Browser.lastClose). Off unless asked for.
     @Published var undoReopensTab: Bool {
@@ -429,6 +446,13 @@ final class Preferences: ObservableObject {
     /// of the row (see Browser.frontLinksBeside). Off unless asked for.
     @Published var frontLinksBeside: Bool {
         didSet { store.set(frontLinksBeside, forKey: "tabs.frontBeside") }
+    }
+    /// A swipe back from the page a link opened a tab on closes the tab and
+    /// goes back to the one viewed before it, as a small window's does (see
+    /// Browser.armSwipeClose). Off unless asked for: some use back on a
+    /// fresh tab to mean nothing at all.
+    @Published var swipeBackCloses: Bool {
+        didSet { store.set(swipeBackCloses, forKey: "tabs.swipeBackCloses") }
     }
     /// Every window of a profile lists the same open tabs in each space, as
     /// it lists the same pins: opened, closed, moved, grouped or renamed in
@@ -497,6 +521,14 @@ final class Preferences: ObservableObject {
         didSet {
             store.set(sendsPrivacySignal, forKey: "privacy.gpc")
             PrivacySignal.on = sendsPrivacySignal
+        }
+    }
+    /// http:// pages tried over HTTPS first (see Privacy.swift). Off unless
+    /// turned on.
+    @Published var triesHTTPSFirst: Bool {
+        didSet {
+            store.set(triesHTTPSFirst, forKey: "privacy.httpsFirst")
+            HTTPSFirst.on = triesHTTPSFirst
         }
     }
     /// Ad-click IDs taken off links before the page loads (see
@@ -569,6 +601,20 @@ final class Preferences: ObservableObject {
             store.set(autocorrect, forKey: "autocorrect")
             // Every page, open and to come: WebKit's one switch for them all.
             Preferences.switchWebKit(autocorrect: autocorrect)
+        }
+    }
+    /// macOS's inline predictive text: the grey rest of a word or phrase
+    /// offered at the caret as you type, taken with Tab. WebKit shows it in
+    /// every text field of every page whenever the Mac's setting is on
+    /// (System Settings › Keyboard › Text Input › Show inline predictive
+    /// text, on unless turned off), whatever autocorrect says; Chrome and
+    /// Arc never show it. Off here unless switched on in Edit › Spelling
+    /// and Grammar, which then counts over the Mac's setting, for pages and
+    /// Search's own fields alike.
+    @Published var inlinePredictions: Bool {
+        didSet {
+            store.set(inlinePredictions, forKey: "inlinePredictions")
+            Preferences.tellWebKit(inlinePredictions: inlinePredictions)
         }
     }
     /// How big every site is drawn until it has been zoomed on its own.
@@ -746,6 +792,15 @@ final class Preferences: ObservableObject {
     @Published var sendsLinksToSpaces: Bool {
         didSet { store.set(sendsLinksToSpaces, forKey: SpaceRoutes.key) }
     }
+    /// Every space as a button of its own beside the bookmarks, centred at
+    /// the column's foot, in place of the one dot and its menu (see
+    /// SpaceButtons). Off unless asked for, and only with spaces on.
+    @Published var spaceButtons: Bool {
+        didSet { store.set(spaceButtons, forKey: Preferences.spaceButtonsKey) }
+    }
+    nonisolated static let spaceButtonsKey = "spaces.buttons"
+    /// Whether the space buttons stand in for the dot: asked for, with spaces on.
+    var showsSpaceButtons: Bool { spaceButtons && usesSpaces }
     /// Which site goes to which space, for that.
     @Published var spaceRoutes: [SpaceRoute] {
         didSet { store.set(spaceRoutes.map(\.plist), forKey: SpaceRoutes.rulesKey) }
@@ -817,12 +872,6 @@ final class Preferences: ObservableObject {
         didSet { store.set(waitsForPlay, forKey: Preferences.waitsKey) }
     }
     nonisolated static let waitsKey = "media.click"
-    /// Translate Page in the page's right-click menu, on this Mac only
-    /// (Translate.swift).
-    /// Always on since the Settings rework (Drice, 24 Oct 2026): it only
-    /// adds a command, so there is no switch. Still a property, for the
-    /// code that asks and the tests that turn it off; never written.
-    @Published var translatesPages = true
     /// Empty follows the Mac's preferred language.
     @Published var translateTarget: String {
         didSet { store.set(translateTarget, forKey: "translate.target") }
@@ -1043,6 +1092,12 @@ final class Preferences: ObservableObject {
     @Published var recentInNewTab: Bool {
         didSet { store.set(recentInNewTab, forKey: "newtab.recent") }
     }
+    /// The floating field finds your open tabs and pins as you type, above
+    /// the places a new tab would go, and Return goes to the open one, as
+    /// Arc's ⌘T does (Browser.tabOffers). Off unless asked for.
+    @Published var arcTabPopup: Bool {
+        didSet { store.set(arcTabPopup, forKey: "newtab.arc") }
+    }
 
     init() {
         Preferences.settleLittleLinks(in: store)
@@ -1068,6 +1123,10 @@ final class Preferences: ObservableObject {
         }
         let chosen = store.string(forKey: "look").flatMap(Look.init) ?? .system
         look = chosen
+        homeTheme = store.string(forKey: "home.theme").flatMap(HomeTheme.stored) ?? .off
+        homeThemeImage = store.string(forKey: "home.theme.image")
+        homeShuffle = store.bool(forKey: "home.shuffle")
+        homeTuning = HomeTuning.read(store.string(forKey: "home.tuning")) ?? HomeTuning()
         // Before the first window, and not deferred: the window that is about
         // to be made should be made in the right appearance. Through `shared`
         // rather than `NSApp`: on macOS 14 SwiftUI builds this before it has
@@ -1117,9 +1176,11 @@ final class Preferences: ObservableObject {
         newTabAfterLast = store.bool(forKey: "tabs.newAfterLast")
         closeGoesBack = store.bool(forKey: "tabs.closeGoesBack")
         undoReopensTab = store.bool(forKey: "tabs.undoReopens")
+        homeGrid = store.bool(forKey: "home.grid")
         switcherBehindFirst = store.bool(forKey: "tabs.switcherBehindFirst")
         switcherLeavesOutPins = store.bool(forKey: "tabs.switcherLeavesOutPins")
         frontLinksBeside = store.bool(forKey: "tabs.frontBeside")
+        swipeBackCloses = store.bool(forKey: "tabs.swipeBackCloses")
         mirrorsTabs = store.bool(forKey: "tabs.mirror")
         newTabPlace = store.string(forKey: "tabs.newPlace").flatMap(NewTabPlace.init(rawValue:)) ?? .next
         startsFresh = store.bool(forKey: Preferences.freshKey)
@@ -1141,6 +1202,9 @@ final class Preferences: ObservableObject {
         let signals = store.object(forKey: "privacy.gpc") as? Bool ?? true
         sendsPrivacySignal = signals
         PrivacySignal.on = signals
+        let https = store.bool(forKey: "privacy.httpsFirst")
+        triesHTTPSFirst = https
+        HTTPSFirst.on = https
         let removes = store.object(forKey: "privacy.clickIDs") as? Bool ?? true
         removesClickIDs = removes
         ClickIDs.on = removes
@@ -1212,6 +1276,7 @@ final class Preferences: ObservableObject {
         launcherLittle = store.bool(forKey: "launcher.little")
         launcherKey = store.data(forKey: "launcher.key").flatMap { try? JSONDecoder().decode(LauncherKey.self, from: $0) }
         recentInNewTab = store.bool(forKey: "newtab.recent")
+        arcTabPopup = store.bool(forKey: "newtab.arc")
         // On for everyone who never touched it (24 Oct 2026).
         let history = store.object(forKey: "swipe.history") as? Bool ?? true
         holdsHistory = history
@@ -1245,6 +1310,7 @@ final class Preferences: ObservableObject {
         littleFindsTabs = store.bool(forKey: "links.little.tabs")
         webmail = store.string(forKey: "mail.webmail").flatMap(Webmail.init(rawValue:)) ?? .none
         sendsLinksToSpaces = store.bool(forKey: SpaceRoutes.key)
+        spaceButtons = store.bool(forKey: Preferences.spaceButtonsKey)
         spaceRoutes = (store.array(forKey: SpaceRoutes.rulesKey) ?? []).compactMap(SpaceRoute.init(plist:))
         asksSpaceForLinks = store.bool(forKey: "links.ask")
         linkChoices = (store.array(forKey: "links.ask.last") ?? []).compactMap(LinkChooser.Choice.init(plist:))
@@ -1289,6 +1355,9 @@ final class Preferences: ObservableObject {
         autocorrect = corrects
         // Before the first web view exists: WebKit reads these once.
         Preferences.tellWebKit(autocorrect: corrects)
+        let predicts = store.bool(forKey: "inlinePredictions")
+        inlinePredictions = predicts
+        Preferences.tellWebKit(inlinePredictions: predicts)
         Substitution.register()
         pageZoom = store.object(forKey: "pageZoom") as? Double ?? 1
         // Left behind by an assistant this browser no longer has.
@@ -1335,6 +1404,10 @@ final class Preferences: ObservableObject {
     /// written back.
     func reread() {
         take(\.look, "look", store.string(forKey: "look").flatMap(Look.init), or: .system)
+        take(\.homeTheme, "home.theme", store.string(forKey: "home.theme").flatMap(HomeTheme.stored), or: .off)
+        take(\.homeThemeImage, store.string(forKey: "home.theme.image"))
+        take(\.homeShuffle, store.bool(forKey: "home.shuffle"))
+        take(\.homeTuning, "home.tuning", HomeTuning.read(store.string(forKey: "home.tuning")), or: HomeTuning())
         take(\.navigationLeft, store.bool(forKey: "toolbar.left"))
         take(\.compactStrip, store.bool(forKey: "tabs.compact"))
         take(\.sidebar, "sidebar", store.object(forKey: "sidebar") as? Bool,
@@ -1400,6 +1473,17 @@ final class Preferences: ObservableObject {
     }
 
     static let autocorrectKey = "WebAutomaticSpellingCorrectionEnabled"
+
+    /// Inline predictions are AppKit's, not WebKit's: a page view asks
+    /// NSSpellChecker at each keystroke, which reads this from the app's
+    /// own defaults before the Mac's global ones, and never caches it. So
+    /// writing it here is absolute and takes effect at the next key, in
+    /// every page, open or to come, in every profile (idea 842).
+    static func tellWebKit(inlinePredictions: Bool) {
+        UserDefaults.standard.set(inlinePredictions, forKey: inlinePredictionsKey)
+    }
+
+    static let inlinePredictionsKey = "NSAutomaticInlinePredictionEnabled"
 
     /// Once WebKit has read the default it keeps its own copy, for every
     /// page of the app, and the only way to change it is its own toggle
