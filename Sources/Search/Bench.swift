@@ -50,6 +50,8 @@ final class Bench {
     /// How many covers the last ⌘S laid over what a page had yet to draw
     /// (see Browser.cover).
     static var foldCovers = 0
+    /// "icloudpair": Sync with iCloud over a stand-in, test runs only.
+    static var pair: (sync: ICloudSync, engine: ICloudFolderEngine)?
 
     /// See the bench's `caret`.
     static func caret(_ editor: NSTextView, in field: NSTextField) -> [String: Any] {
@@ -74,6 +76,17 @@ final class Bench {
     }
     static func count(_ name: String) {
         if counting { bodies[name, default: 0] += 1 }
+    }
+    /// What each window's bookmarks bar has no room for, as last laid out:
+    /// what its » lists. For "bar".
+    static var barHidden: [ObjectIdentifier: [Bookmark.ID]] = [:]
+    /// Where each on a bar was laid out, from the window's top left.
+    static var barFrames: [Bookmark.ID: CGRect] = [:]
+    static func barLaid(_ id: Bookmark.ID, _ frame: CGRect) {
+        if counting { barFrames[id] = frame }
+    }
+    static func barHides(_ browser: Browser, _ hidden: [Bookmark]) {
+        if counting { barHidden[ObjectIdentifier(browser)] = hidden.map(\.id) }
     }
     /// Each row in the column's own answer to the pointer coming and going,
     /// the very one its onHover gives (SideRow), for "hoversweep". Counted,
@@ -406,6 +419,54 @@ final class Bench {
             let limit = Date().addingTimeInterval(request["seconds"] as? Double ?? 20)
             wait(for: tab, until: limit, answer)
 
+        case "wheel":
+            // A mouse wheel's notches on a tab's page, as a wheel that steps
+            // in lines sends them, and where the page was every 4 ms from
+            // the first: the positions it went through say whether a notch
+            // jumped or glided (WheelGlide). "smooth" sets the switch first.
+            // Only on a SEARCH_PROBE run.
+            guard Store.testing else { answer(["error": "wheel only works on a --test run"]); return }
+            guard let tab = find(request, in: browser), let web = tab.built else { answer(missing(request)); return }
+            if let on = request["smooth"] as? Bool { WheelGlide.on = on }
+            let notches = request["notches"] as? Int ?? 3
+            let gap = (request["gap"] as? Double ?? 250) / 1000
+            let lines = request["lines"] as? Double ?? -1
+            let probe = request["probe"] as? String ?? "scrollY"
+            // The page's middle, in the window. A hidden probe's window is on
+            // no screen, so the notch carries the place as the window's own
+            // point, which is how WebKit reads an event from no window.
+            let middle = web.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), to: nil)
+            func notch() -> NSEvent? {
+                guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 0, wheel2: 0, wheel3: 0)
+                else { return nil }
+                cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 0)
+                cg.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: lines)
+                cg.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: Int64(lines.rounded()))
+                let height = NSScreen.screens.first?.frame.height ?? 0
+                cg.location = CGPoint(x: middle.x, y: height - middle.y)
+                return NSEvent(cgEvent: cg)
+            }
+            let start = CACurrentMediaTime()
+            var seen: [[Int]] = []
+            let look = Timer(timeInterval: 0.004, repeats: true) { _ in
+                let t = Int((CACurrentMediaTime() - start) * 1000)
+                web.evaluateJavaScript(probe) { value, _ in
+                    let y = (value as? NSNumber)?.intValue ?? -1
+                    if seen.last?[1] != y { seen.append([t, y]) }
+                }
+            }
+            RunLoop.main.add(look, forMode: .common)
+            for n in 0..<notches {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05 + Double(n) * gap) {
+                    if let e = notch() { web.scrollWheel(with: e) }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05 + Double(notches) * gap + 0.6) {
+                look.invalidate()
+                // Steps of a notch: positions it went through before the next.
+                answer(["positions": seen, "last": seen.last?[1] ?? -1, "smooth": WheelGlide.on])
+            }
+
         case "sleep":
             // Now rather than after half an hour, but past every other check
             // a tab has to clear — the answer says which one kept it awake.
@@ -515,8 +576,8 @@ final class Bench {
 
         case "page":
             // bench-mcp's page scripts (PageScripts, shared with coding
-            // agents), run in Search's own world: read the page, touch one
-            // element of the last read, or check a condition.
+            // agents), run in Search's own world: read the page or outline
+            // it, touch one element of the last read, or check a condition.
             guard let tab = find(request, in: browser) else { answer(missing(request)); return }
             house(tab)
             func int(_ key: String, _ otherwise: Int) -> Int { (request[key] as? NSNumber)?.intValue ?? otherwise }
@@ -532,8 +593,11 @@ final class Bench {
                                            replace: request["replace"] as? Bool ?? true)
             case "check":
                 script = PageScripts.check(request["condition"] as? [String: Any] ?? [:])
+            case "outline":
+                script = PageScripts.outline(key: key, snap: int("snap", 1),
+                                             options: request["options"] as? [String: Any] ?? [:])
             default:
-                answer(["error": "page needs a script: read, touch or check"])
+                answer(["error": "page needs a script: read, touch, check or outline"])
                 return
             }
             tab.web.evaluateJavaScript(script, in: nil, in: Web.world) { result in
@@ -747,6 +811,12 @@ final class Bench {
             if let on = request["on"] as? Bool {
                 browser.newsShowing = on
                 answer(["showing": on])
+                return
+            }
+            // "rows": the card's switches, in its order, as it would open now.
+            if request["rows"] as? Bool == true {
+                let rows = WhatsNew.rows(for: release, prefs: browser.prefs)
+                answer(["version": release.version, "first": (rows.leading + rows.own).map(\.title), "earlier": rows.earlier.map(\.title)])
                 return
             }
             guard let path = request["path"] as? String else { answer(["error": "news needs a path"]); return }
@@ -1054,6 +1124,33 @@ final class Bench {
                 // a page, or a button it shouldn't be.
                 "responder": (NSApp.keyWindow ?? Links.window)?.firstResponder.map { "\(type(of: $0))" } ?? "",
             ]
+            // What decides whether the page in front counts as seen and as
+            // focused (idea 949): its window, whether that window is visible,
+            // key and uncovered, whether the page or a view around it is
+            // hidden, whether it has the keys, and every other web view
+            // the app holds showing the same address, in which window.
+            if let tab = browser.active, let web = tab.built {
+                func pages(_ view: NSView) -> [WKWebView] { ((view as? WKWebView).map { [$0] } ?? []) + view.subviews.flatMap(pages) }
+                let address = web.url?.absoluteString
+                let copies = NSApp.windows.flatMap { window in
+                    (window.contentView.map(pages) ?? []).filter { $0 !== web && address != nil && $0.url?.absoluteString == address }
+                        .map { ["window": "\(type(of: window))", "hidden": $0.isHiddenOrHasHiddenAncestor, "sameWindow": window === web.window] }
+                }
+                out["pageActivity"] = [
+                    "inBrowserWindow": web.window != nil && web.window === browser.window,
+                    "window": web.window.map { "\(type(of: $0))" } ?? "",
+                    "windowVisible": web.window?.isVisible ?? false,
+                    "windowKey": web.window?.isKeyWindow ?? false,
+                    "windowUncovered": web.window?.occlusionState.contains(.visible) ?? false,
+                    "appActive": NSApp.isActive,
+                    "appHidden": NSApp.isHidden,
+                    "pageHidden": web.isHiddenOrHasHiddenAncestor,
+                    "alpha": Double(web.alphaValue),
+                    "hasKeys": (web.window?.firstResponder as? NSView).map { $0 === web || $0.isDescendant(of: web) } ?? false,
+                    "windowResponder": web.window?.firstResponder.map { "\(type(of: $0))" } ?? "",
+                    "copies": copies,
+                ] as [String: Any]
+            }
             // Whether that is the address field's own editor: a find field or
             // a tab's title being renamed is an NSTextView too.
             if let window = browser.window ?? Links.window, let editor = window.firstResponder as? NSTextView {
@@ -1205,7 +1302,10 @@ final class Bench {
             guard let tab = find(request, in: browser), let text = request["text"] as? String else { answer(missing(request)); return }
             house(tab)
             let view = tab.web
+            // As a click on the page leaves them (PageView.handedAsClick).
+            PageView.handedAsClick = true
             view.window?.makeFirstResponder(view)
+            PageView.handedAsClick = false
             let before = PageView.quieted
             // What WebKit sends back through the app because the page didn't
             // use it: a key press seen here again after it was handed over.
@@ -1692,6 +1792,30 @@ final class Bench {
                 }
                 return
             }
+            if let dx = request["drag"] as? Double {
+                // A press there dragged `dx` points to the right and let go,
+                // handed to the view under it, as `double` is. Never to a
+                // strip: its drag is the system's own window drag, which
+                // follows the real pointer (idea 928's probe asks the page's).
+                guard Store.testing else { answer(["error": "hit … drag only works on a --test run"]); return }
+                guard let hit, !(hit is DragStrip.Strip) else { answer(["error": "a drag there would move the window", "view": "Strip"]); return }
+                let before = window.frame
+                func event(_ type: NSEvent.EventType, _ at: NSPoint) -> NSEvent? {
+                    NSEvent.mouseEvent(with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                                       pressure: type == .leftMouseUp ? 0 : 1)
+                }
+                if let down = event(.leftMouseDown, point) { hit.mouseDown(with: down) }
+                for step in 1...8 {
+                    let at = NSPoint(x: point.x + dx * Double(step) / 8, y: point.y)
+                    if let drag = event(.leftMouseDragged, at) { hit.mouseDragged(with: drag) }
+                }
+                if let up = event(.leftMouseUp, NSPoint(x: point.x + dx, y: point.y)) { hit.mouseUp(with: up) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    answer(["view": String("\(type(of: hit))".prefix(60)), "moved": window.frame.origin != before.origin])
+                }
+                return
+            }
             if request["double"] as? Bool == true {
                 // A double-click there, handed to the view under it — through
                 // the window it would never arrive, the probe being in the
@@ -1728,6 +1852,9 @@ final class Bench {
                 // Whether the window is movable with the pointer resting
                 // there, as window managers find it (idea 744).
                 "movableHovered": DragStrip.hover(window, at: point),
+                // And whether AppKit would then carry it off on a single
+                // press there, by its own rule (idea 935).
+                "titleDragHovered": DragStrip.Strip.titleDrag ?? NSNull(),
             ])
 
         case "field":
@@ -2038,6 +2165,52 @@ final class Bench {
                     "closed": Double(NSHostingView(rootView: closed).fittingSize.height),
                     "shown": Double(NSHostingView(rootView: shown).fittingSize.height),
                     "opening": opening.count])
+
+        case "bar":
+            // The bookmarks bar as laid out in this window, off every screen:
+            // its top level, which of them its » holds, and that menu, every
+            // folder in it opened. "width": the window that wide first (a
+            // hidden probe's, on no screen). "pick": the »'s item of that
+            // title chosen, as a click on it would.
+            guard Store.testing else { answer(["error": "bar only works on a --test run — it would size your window"]); return }
+            guard let window = browser.window else { answer(["error": "no window"]); return }
+            if let width = request["width"] as? Double {
+                var frame = window.frame
+                frame.size.width = width
+                window.setFrame(frame, display: false)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                window.contentView?.layoutSubtreeIfNeeded()
+                let hiddenIDs = Bench.barHidden[ObjectIdentifier(browser)] ?? []
+                let roots = browser.bookmarks.roots
+                let hidden = roots.filter { hiddenIDs.contains($0.id) }
+                let menu = BookmarkMenu.shared.overflow(hidden, title: "More Bookmarks")
+                func lines(_ items: [NSMenuItem], _ depth: Int) -> [[String: Any]] {
+                    items.flatMap { item -> [[String: Any]] in
+                        var out: [[String: Any]] = [["depth": depth, "title": item.title, "folder": item.submenu != nil]]
+                        if let sub = item.submenu {
+                            BookmarkMenu.shared.menuNeedsUpdate(sub)
+                            // A folder's Open All at its foot left out, as `marks` does.
+                            out += lines(sub.items.filter { !$0.isSeparatorItem && $0.tag != 0x5EAD }, depth + 1)
+                        }
+                        return out
+                    }
+                }
+                let before = browser.tabs.count
+                if let pick = request["pick"] as? String, let index = menu.items.firstIndex(where: { $0.title == pick }) {
+                    menu.performActionForItem(at: index)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    let frames = roots.map { node -> [Double] in
+                        let f = Bench.barFrames[node.id] ?? .zero
+                        return [Double(f.minX), Double(f.minY), Double(f.width), Double(f.height)]
+                    }
+                    answer(["width": Double(window.frame.width), "roots": roots.map(\.label), "frames": frames,
+                            "hidden": hidden.map(\.label), "menu": lines(menu.items, 0),
+                            "tabsBefore": before, "tabsAfter": browser.tabs.count,
+                            "active": browser.active?.address?.absoluteString ?? ""])
+                }
+            }
 
         case "marks":
             // Each bookmark wherever it is shown, nothing drawn on a screen:
@@ -2368,9 +2541,22 @@ final class Bench {
             // running, waiting or listening. "on": asks the switch to turn
             // on, which a test run always refuses: CloudKit is never
             // reached from one. Test runs only.
+            //
+            // The default for a new install (SyncDefault.swift): "new", where
+            // the welcome's switches start, Handoff, and "leave": true
+            // leaves the welcome as Skip or Start browsing does, with its
+            // switches as they start unless "sync" or "handoff" say otherwise.
             guard Store.testing else { answer(["error": "icloud only works on a --test run"]); return }
             let icloud = ICloudSync.shared
             if request["turn"] as? String == "on" { icloud.turnOn() }
+            let starts = SyncDefault.startsNow()
+            if request["leave"] as? Bool == true, browser.welcoming {
+                SyncDefault.welcomeLeft(sync: request["sync"] as? Bool ?? starts.sync,
+                                        handoff: request["handoff"] as? Bool ?? starts.handoff,
+                                        prefs: browser.prefs, icloud: icloud)
+                browser.prefs.welcomed = true
+                browser.welcoming = false
+            }
             // "entitled": the signature carries the container and CloudKit,
             // read from the process alone; nothing asks CloudKit.
             answer(["on": icloud.on, "available": icloud.available, "entitled": ICloudSync.entitled,
@@ -2378,7 +2564,64 @@ final class Bench {
                     "engine": icloud.engine != nil, "joined": icloud.joined, "folderSync": Sync.shared.on,
                     "stored": Store.settings.object(forKey: ICloudSync.onKey) != nil,
                     "file": FileManager.default.fileExists(atPath: Store.file("icloud.json").path),
-                    "summary": icloud.summary(folderSyncOn: Sync.shared.on, otherwise: "off")])
+                    "summary": icloud.summary(folderSyncOn: Sync.shared.on, otherwise: "off"),
+                    "new": SyncDefault.isNew(Store.settings), "welcoming": browser.welcoming,
+                    "starts": { let now = SyncDefault.startsNow(); return ["sync": now.sync, "handoff": now.handoff] }(),
+                    "handoff": browser.prefs.handoff,
+                    "handoffStored": Store.settings.object(forKey: "handoff") != nil,
+                    "offered": browser.window?.userActivity != nil])
+
+        case "icloudpair":
+            // Sync with iCloud between two hidden probes (Tests/icloud_two_macs.py),
+            // over a shared folder rather than CloudKit (ICloudStandIn.swift):
+            // this Mac's real pins, folders and rows, a stand-in iCloud.
+            // "start" FOLDER joins, "sync" puts up what changed here, "fetch"
+            // takes what the other wrote (ONLY: records whose names start
+            // so), "stop". Test runs only.
+            guard Store.testing else { answer(["error": "icloudpair only works on a --test run"]); return }
+            let suite = "com.officecommun.search.icloudpair.\(getpid())"
+            func state(_ extra: [String: Any] = [:]) -> [String: Any] {
+                var out: [String: Any] = ["joined": Bench.pair?.sync.joined ?? false,
+                                          "records": (Bench.pair?.sync.ledger.values.keys.sorted() ?? [])]
+                for (key, value) in extra { out[key] = value }
+                return out
+            }
+            switch request["action"] as? String ?? "state" {
+            case "start":
+                guard Bench.pair == nil, let path = request["folder"] as? String, !path.isEmpty else { answer(["error": "start needs FOLDER, once"]); return }
+                guard let defaults = UserDefaults(suiteName: suite) else { answer(["error": "no defaults"]); return }
+                defaults.removePersistentDomain(forName: suite)
+                let engine = ICloudFolderEngine(folder: URL(fileURLWithPath: path, isDirectory: true))
+                let sync = ICloudSync(local: MacSide(), defaults: defaults, file: nil, available: true) { owner, _ in
+                    engine.owner = owner
+                    return engine
+                }
+                engine.owner = sync
+                Bench.pair = (sync, engine)
+                sync.turnOn()
+                Task { @MainActor in
+                    await sync.join()
+                    answer(state(["sent": engine.flush()]))
+                }
+            case "sync":
+                guard let pair = Bench.pair else { answer(["error": "not started"]); return }
+                pair.sync.publish()
+                answer(state(["sent": pair.engine.flush()]))
+            case "fetch":
+                guard let pair = Bench.pair else { answer(["error": "not started"]); return }
+                pair.engine.only = request["only"] as? String
+                Task { @MainActor in
+                    try? await pair.engine.fetch()
+                    answer(state())
+                }
+            case "stop":
+                Bench.pair?.sync.turnOff()
+                Bench.pair = nil
+                UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+                answer(state())
+            default:
+                answer(state())
+            }
 
         case "menus":
             // Every menu of the menu bar, by title, after SwiftUI has filled
@@ -3015,22 +3258,49 @@ final class Bench {
             // measures a screen point (from the top of the main screen).
             let middle = web.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), to: nil)
             let over = CGPoint(x: middle.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - middle.y)
-            func send(_ phase: Int64, _ delta: Double) {
-                guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: Int32(delta), wheel3: 0) else { return }
+            // "dy": up or down along with it, spread the same way. "back":
+            // drawn back this far after DX, in steps of its own, before the
+            // fingers lift. "down": a flick down of that many points, let go
+            // with its glide still going when the sideways one starts (#1389).
+            let dy = request["dy"] as? Double ?? 0
+            let back = request["back"] as? Double ?? 0
+            let down = request["down"] as? Double ?? 0
+            func send(_ phase: Int64, _ delta: Double, _ vertical: Double = 0, momentum: Int64 = 0) {
+                guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(vertical), wheel2: Int32(delta), wheel3: 0) else { return }
                 cg.location = over
                 cg.setIntegerValueField(CGEventField(rawValue: 88)!, value: 1) // kCGScrollWheelEventIsContinuous
                 cg.setIntegerValueField(CGEventField(rawValue: 99)!, value: phase) // kCGScrollWheelEventScrollPhase
+                cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
                 cg.setIntegerValueField(CGEventField(rawValue: 97)!, value: Int64(delta)) // kCGScrollWheelEventPointDeltaAxis2
+                cg.setIntegerValueField(CGEventField(rawValue: 96)!, value: Int64(vertical)) // kCGScrollWheelEventPointDeltaAxis1
                 if let event = NSEvent(cgEvent: cg) { web.scrollWheel(with: event) }
             }
-            send(1, 0)
-            for n in 1...steps {
-                DispatchQueue.main.asyncAfter(deadline: .now() + ms / 1000 * Double(n) / Double(steps)) {
-                    send(2, dx / Double(steps))
-                    if n == steps { send(4, 0) }
+            var start = 0.0
+            if down != 0 {
+                send(1, 0)
+                for _ in 1...4 { send(2, 0, -down / 4) }
+                send(4, 0)
+                // The glide: on through the sideways gesture's start.
+                for n in 0..<12 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.016 * Double(n + 1)) {
+                        send(0, 0, -down / 8 * pow(0.85, Double(n + 1)), momentum: n == 0 ? 1 : (n == 11 ? 3 : 2))
+                    }
+                }
+                start = 0.06
+            }
+            let backSteps = back > 0 ? max(2, steps / 2) : 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + start) { send(1, 0) }
+            for n in 1...(steps + backSteps) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + start + ms / 1000 * Double(n) / Double(steps)) {
+                    if n <= steps {
+                        send(2, dx / Double(steps), dy / Double(steps))
+                    } else {
+                        send(2, -(dx < 0 ? -1 : 1) * back / Double(backSteps))
+                    }
+                    if n == steps + backSteps { send(4, 0) }
                 }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + ms / 1000 + 1.2) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + start + ms / 1000 * Double(steps + backSteps) / Double(steps) + 1.2) {
                 answer(["before": before, "after": tab.address?.absoluteString ?? ""])
             }
 
@@ -3190,6 +3460,11 @@ final class Bench {
                     let made = browser.addTabGroup(containing: tab)
                     if !named.isEmpty { browser.renameTabGroup(made, to: named) }
                     browser.editingGroupID = nil
+                } else if request["out"] as? Bool == true {
+                    // Carried out of its group and let go in the row, as the
+                    // strip's drop does it: before "before", or at the end.
+                    let before = (request["before"] as? String).flatMap { id in browser.tabs.first { Bench.short($0) == id }?.id }
+                    browser.move(tab, outOfGroupBefore: before)
                 } else if named == "none" {
                     browser.move(tab, toGroup: nil)
                 } else if let group {
@@ -3197,9 +3472,17 @@ final class Bench {
                 } else {
                     answer(["error": "no group “\(named)”"]); return
                 }
+            } else if let colour = request["colour"] as? Int {
+                // Colour… from its menu: 0 is None.
+                guard let group else { answer(["error": "no group “\(named)”"]); return }
+                browser.setTabGroupColour(group.id, to: colour)
             } else if request["fold"] as? Bool == true {
                 guard let group else { answer(["error": "no group “\(named)”"]); return }
                 browser.toggleTabGroup(group.id)
+            } else if request["newTab"] as? Bool == true {
+                // New Tab in Group, from its heading's menu.
+                guard let group else { answer(["error": "no group “\(named)”"]); return }
+                browser.newTab(inGroup: group.id)
             } else if request["close"] as? Bool == true {
                 guard let group else { answer(["error": "no group “\(named)”"]); return }
                 browser.closeTabGroup(group.id)
@@ -3239,9 +3522,10 @@ final class Bench {
             let tabsMenu = NSApp.mainMenu?.items.first(where: { $0.title == "Tabs" })?.submenu
             let brackets = ["Back", "Forward"].map { title in tabsMenu?.items.first { $0.title == title }?.keyEquivalent ?? "" }
             answer(["viewItems": items(view), "spaceItems": items(SpaceMenu.menu(for: browser)), "brackets": brackets,
+                    "launching": browser.launching, "active": browser.active.map(Bench.short) ?? "",
                     "on": browser.prefs.usesTabGroups, "groups": browser.tabGroups.map { group in
                 ["id": String(group.id.uuidString.prefix(8)).lowercased(), "name": group.name, "collapsed": group.collapsed,
-                 "tabs": browser.tabs(in: group.id).map(Bench.short)] as [String: Any]
+                 "colour": group.colour ?? 0, "tabs": browser.tabs(in: group.id).map(Bench.short)] as [String: Any]
             }])
 
         case "tospace":
@@ -3444,6 +3728,11 @@ final class Bench {
             // screen (after `film float`, or `float` with action `up`), and
             // nothing shown.
             guard Store.testing else { answer(["error": "float only works on a --test run"]); return }
+            // Whether the little window is up, and whose video it holds.
+            if request["action"] as? String == "showing" {
+                answer(["showing": browser.floater.showing, "floating": browser.floating?.uuidString ?? ""])
+                return
+            }
             if request["action"] as? String == "up" {
                 // The window itself, off every screen, with no video to find:
                 // the button and the size are what is under test.
@@ -3947,6 +4236,69 @@ final class Bench {
                 }
             }
 
+        case "layershot":
+            // The window's layers as Core Animation holds them, without
+            // asking any view to draw: what was last handed to the window
+            // server, stale or not (film, by drawing the views afresh, shows
+            // what they would draw now). "frames" pictures "every" seconds
+            // apart; after the first, "action": "space" (⌃N to "index"),
+            // "swipe" (two fingers, "dx"). "stage": the window first staged
+            // off every screen (FoldFrames.stage), so it is drawn and its
+            // glides run at the display's pace. Test runs, hidden, only.
+            guard Store.testing, NSApp.isHidden else { answer(["error": "layershot is for hidden test runs"]); return }
+            guard let window = browser.window, let root = window.contentView?.superview, let top = root.layer,
+                  let path = request["path"] as? String else { answer(["error": "layershot needs the window and a path"]); return }
+            if request["stage"] as? Bool == true, !FoldFrames.stage(window) { answer(["error": "the window would have shown"]); return }
+            let count = min(60, max(1, request["frames"] as? Int ?? 10))
+            let every = min(1, max(0.005, request["every"] as? Double ?? 1.0 / 60))
+            let scale = window.backingScaleFactor
+            let started = CACurrentMediaTime()
+            var shots: [[String: Any]] = []
+            var pictures: [(Int, CGImage)] = []
+            func take(_ index: Int) {
+                guard index < count else {
+                    for (at, image) in pictures {
+                        let file = path + String(format: "-%02d.png", at)
+                        if let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]),
+                           (try? data.write(to: URL(fileURLWithPath: file))) != nil { shots[at]["file"] = file }
+                    }
+                    answer(["frames": shots, "scale": Double(scale)])
+                    return
+                }
+                let size = top.bounds.size
+                // The column's side: the window's first 420 points across.
+                let w = Int(min(size.width, 420) * scale), h = Int(size.height * scale)
+                let shot: [String: Any] = ["t": Int((CACurrentMediaTime() - started) * 1000), "space": browser.space.name]
+                if let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                       space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                    ctx.scaleBy(x: scale, y: scale)
+                    top.render(in: ctx)
+                    // Written once the filming is over.
+                    if let image = ctx.makeImage() { pictures.append((index, image)) }
+                }
+                shots.append(shot)
+                if index == 0 {
+                    switch request["action"] as? String {
+                    case "space":
+                        // Slid in through the map, as on screen.
+                        SpaceSwipe.glidesHidden = true
+                        browser.switchSpace(index: (request["index"] as? Int ?? 1) - 1)
+                        SpaceSwipe.glidesHidden = false
+                    case "swipe":
+                        let dx = request["dx"] as? Double ?? -160
+                        SpaceSwipe.shared.start(for: browser)
+                        SpaceSwipe.shared.began()
+                        for step in 0..<8 {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + Double(step) / 60) { SpaceSwipe.shared.moved(along: dx / 8) }
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0 / 60) { SpaceSwipe.shared.ended() }
+                    default: break
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + every) { take(index + 1) }
+            }
+            take(0)
+
         case "film":
             // The whole window, title bar and lights included, drawn every few
             // hundredths of a second while something animates — what a person
@@ -4037,20 +4389,57 @@ final class Bench {
             // The row of tabs across the top, drawn off screen at a width,
             // with what the browser has now — for what the row looks like
             // without a window on anybody's screen.
+            // "appearance": "light" or "dark" rather than the Mac's. With it
+            // come where each group's band was drawn, piece by piece
+            // (GroupBand): the heading or tab under it and the piece itself,
+            // [minX, maxX] in the row, by group. And every title drawn: what
+            // it says, how wide it was laid out, and what of it is left once
+            // cut as SwiftUI cuts it ("visible"), by tab and line. And where
+            // each tab of the run was laid out, [minX, maxX] ("items").
             guard let path = request["path"] as? String else { answer(["error": "strip needs a path"]); return }
             let width = request["width"] as? Double ?? 1100
-            let host = NSHostingView(rootView: TabBar(browser: browser).frame(width: width, height: Metrics.strip).background(Palette.ground))
+            let host = NSHostingView(rootView: TabBar(browser: browser).frame(width: width, height: Metrics.strip).background(Palette.ground)
+                .environment(\.recordsBands, true))
             host.frame = NSRect(x: 0, y: 0, width: width, height: Double(Metrics.strip))
             let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
-            window.appearance = NSApp.effectiveAppearance
+            switch request["appearance"] as? String {
+            case "dark": window.appearance = NSAppearance(named: .darkAqua)
+            case "light": window.appearance = NSAppearance(named: .aqua)
+            default: window.appearance = NSApp.effectiveAppearance
+            }
+            TabBar.drawnBands = [:]
+            TabBar.drawnTitles = [:]
+            TabBar.drawnItems = [:]
             window.contentView = host
             host.layoutSubtreeIfNeeded()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 guard let picture = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { answer(["error": "nothing drawn"]); return }
                 host.cacheDisplay(in: host.bounds, to: picture)
+                var bands: [String: [[String: Any]]] = [:]
+                for (piece, drawn) in TabBar.drawnBands.sorted(by: { $0.value.band.minX < $1.value.band.minX }) {
+                    let id = String(drawn.group.uuidString.prefix(8)).lowercased()
+                    let name = piece == drawn.group ? "heading" : String(piece.uuidString.prefix(8)).lowercased()
+                    bands[id, default: []].append(["piece": name,
+                                                   "item": [Double(drawn.item.minX), Double(drawn.item.maxX)],
+                                                   "band": [Double(drawn.band.minX), Double(drawn.band.maxX)],
+                                                   "height": Double(drawn.band.height)])
+                }
+                TabBar.drawnBands = [:]
+                let titles: [[String: Any]] = TabBar.drawnTitles.sorted { $0.key < $1.key }.map { key, drawn in
+                    let parts = key.split(separator: "/")
+                    return ["tab": String(parts[0]), "line": String(parts.last ?? ""), "text": drawn.text,
+                            "width": Double(drawn.width), "shown": drawn.shown,
+                            "visible": Self.cut(drawn.text, to: drawn.width, size: drawn.size,
+                                                medium: drawn.medium, middle: drawn.middle)]
+                }
+                TabBar.drawnTitles = [:]
+                let items = Dictionary(TabBar.drawnItems.map { id, rect in
+                    (String(id.uuidString.prefix(8)).lowercased(), [Double(rect.minX), Double(rect.maxX)])
+                }, uniquingKeysWith: { first, _ in first })
+                TabBar.drawnItems = [:]
                 do {
                     try picture.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-                    answer(["saved": path])
+                    answer(["saved": path, "bands": bands, "titles": titles, "items": items])
                 } catch { answer(["error": error.localizedDescription]) }
                 window.contentView = nil
             }
@@ -4796,6 +5185,8 @@ final class Bench {
             if let text = request["lead"] as? String, let kind = InternalPage.Kind(rawValue: text) { browser.lead(to: InternalPage(kind)) }
             if let text = request["go"] as? String, let url = URL(string: text) { browser.active?.go(to: url) }
             if let on = request["hidden"] as? Bool { browser.reviewing = on }
+            // Hide Elements, on or off, as ⇧⌘H turns it (Browser.toggleHiding).
+            if let on = request["hiding"] as? Bool, on != browser.veiling { browser.toggleHiding() }
             if let look = (request["look"] as? String).flatMap(Look.init) { browser.prefs.look = look }
             if let side = request["side"] as? String {
                 guard let position = SidebarPosition(rawValue: side) else {
@@ -4858,6 +5249,8 @@ final class Bench {
             // The tab on screen clicked again: its address opened, as typed
             // into nothing yet, the site card under it.
             if request["opentab"] as? Bool == true, let tab = browser.active { browser.beginTabEdit(tab) }
+            // The tab's menu › Site Information… on the tab on screen.
+            if request["siteinfo"] as? Bool == true, let tab = browser.active { browser.beginTabEdit(tab, card: true) }
             if request["finishedit"] as? Bool == true { browser.finishTabEdit() }
             if #available(macOS 15.4, *), let on = request["extensions"] as? Bool { Extensions.shared.menuOpen = on }
             // Settings › Privacy › Clear › Cache, answered once every store
@@ -5015,7 +5408,7 @@ final class Bench {
                     "size": [Double(size.width), Double(size.height)],
                     "least": [Double(StylePanel.least.width), Double(StylePanel.least.height)]])
 
-        case "extensions", "ext-add", "ext-crx", "ext-fetches", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "ext-private", "ext-sites", "capture", "capture-stop":
+        case "extensions", "ext-add", "ext-crx", "ext-fetches", "ext-folder", "ext-safari", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "ext-private", "ext-sites", "capture", "capture-stop":
             guard #available(macOS 15.4, *) else {
                 answer(["error": "extensions need macOS 15.4"])
                 return
@@ -5416,6 +5809,9 @@ final class Bench {
                 [
                     "id": Bench.short(tab),
                     "title": tab.title,
+                    // What its row says (Tab.label), and the name you gave it.
+                    "label": tab.label,
+                    "name": tab.name ?? "",
                     "url": tab.address?.absoluteString ?? "",
                     "blank": tab.isBlank,
                     // One of Search's own pages (InternalPages.swift), by its address.
@@ -5466,6 +5862,9 @@ final class Bench {
             "groupIDs": browser.tabs.map { $0.groupID?.uuidString ?? "" },
             "enabled": browser.prefs.splitView,
             "finding": browser.finding,
+            // Hide Elements pointing, and the last thing Search said.
+            "veiling": browser.veiling,
+            "announced": browser.announcement ?? "",
             "needle": browser.needle,
             "findStatus": browser.findStatus ?? "",
             "pins": browser.tabs.filter { $0.pin != nil }.map { Bench.short($0) },
@@ -5559,6 +5958,23 @@ final class Bench {
             guard Store.testing else { answer(["error": "ext-fetches only works on a --test run"]); return }
             answer(["trace": ExtensionFetch.trace, "on": ExtensionFetch.on])
             if request["clear"] as? Bool == true { ExtensionFetch.trace.removeAll() }
+        case "ext-safari":
+            // Settings › Extensions › From Safari apps: what it would list.
+            // In a test run, "in" names other folders to look through.
+            let places = Store.testing ? (request["in"] as? [String])?.map { URL(fileURLWithPath: $0, isDirectory: true) } : nil
+            // "add": a folder, added the way its Add button does — the
+            // button's own check decides, even for one no longer listed.
+            if let add = request["add"] as? String {
+                let folder = URL(fileURLWithPath: add, isDirectory: true)
+                let item = SafariApps.scan(in: places ?? SafariApps.places).first { $0.folder.path == add }
+                    ?? SafariApps.Found(app: "?", appPath: "", name: "?", folder: folder, id: Crx.unpackedID(for: folder))
+                SafariApps.add(item, to: extensions, confirm: !skip)
+                answer(["adding": item.id])
+                return
+            }
+            answer(["on": SafariApps.on, "found": SafariApps.scan(in: places ?? SafariApps.places).map {
+                ["app": $0.app, "name": $0.name, "folder": $0.folder.path, "id": $0.id]
+            }])
         case "ext-folder":
             guard let path = request["path"] as? String else { answer(["error": "ext-folder needs a path"]); return }
             extensions.installFolder(at: URL(fileURLWithPath: path), confirm: !skip)
@@ -5746,6 +6162,23 @@ final class Bench {
         NSGraphicsContext.restoreGraphicsState()
         guard let c = rep.colorAt(x: 0, y: 0) else { return "" }
         return String(format: "%02x%02x%02x", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
+    }
+
+    /// What is left of TEXT laid out WIDTH wide, cut at the end or in the
+    /// middle with a "…" as a one-line Text is: all of it if it fits, else
+    /// as many letters as fit beside the "…", else the "…" alone, else
+    /// nothing. Close to SwiftUI's own, which says nothing of what it cut.
+    static func cut(_ text: String, to width: CGFloat, size: CGFloat, medium: Bool, middle: Bool) -> String {
+        let font = NSFont.systemFont(ofSize: size, weight: medium ? .medium : .regular)
+        let fits = { (line: String) in (line as NSString).size(withAttributes: [.font: font]).width <= width + 0.5 }
+        if fits(text) { return text }
+        let letters = Array(text)
+        for kept in stride(from: letters.count - 1, through: 1, by: -1) {
+            let head = middle ? (kept + 1) / 2 : kept
+            let line = String(letters[..<head]) + "…" + String(letters[(letters.count - (kept - head))...])
+            if fits(line) { return line }
+        }
+        return fits("…") ? "…" : ""
     }
 
     static func short(_ tab: Tab) -> String {

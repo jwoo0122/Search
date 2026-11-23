@@ -189,6 +189,16 @@ enum Metrics {
     static let sideLights: CGFloat = 80
     /// The three doors' own width, without the air after them.
     static let helmDoors: CGFloat = 3 * 26 + 2 * 4
+    /// The same two, for the doors Settings leaves shown (idea 815): all
+    /// three unless some are hidden, nothing when none is.
+    @MainActor static func helm(_ prefs: Preferences) -> CGFloat {
+        let n = CGFloat(prefs.helmDoors)
+        return n == 0 ? 0 : n * 26 + (n - 1) * 2 + 8
+    }
+    @MainActor static func helmDoors(_ prefs: Preferences) -> CGFloat {
+        let n = CGFloat(prefs.helmDoors)
+        return n == 0 ? 0 : n * 26 + (n - 1) * 4
+    }
     /// Tabs are a fixed width rather than the width of their titles, so the
     /// cross always lands in the same place and the row never rearranges
     /// itself while you read it. They give way when there are too many:
@@ -196,7 +206,31 @@ enum Metrics {
     /// stop at tabMinWidth, the mark and its air. Past that the row scrolls,
     /// inside its own edges.
     static let tabWidth: CGFloat = 186
-    static let tabTitled: CGFloat = 80
+    /// A titled tab's own parts, end to end (TabPill.titled): its air at
+    /// the left, the mark, a gap, the title, a gap, the spring at its
+    /// least, a gap, the slot the cross and the ring take (kept while
+    /// empty, so the title doesn't move under the pointer), its air at the
+    /// right. Everything but the title.
+    static let tabLead: CGFloat = 11
+    static let tabTrail: CGFloat = 7
+    static let tabMark: CGFloat = 15
+    static let tabSpacing: CGFloat = 6
+    static let tabSpring: CGFloat = 2
+    static let tabCloseSlot: CGFloat = 15
+    static let tabFixed: CGFloat = tabLead + tabMark + tabSpacing + tabSpacing + tabSpring + tabSpacing + tabCloseSlot + tabTrail
+    /// The least a title is given: three letters and the "…", as most
+    /// titles' letters run at 12.5 points ("Rec…" is 32, "Wea…" 35). Less
+    /// than that and a tab showed its mark and a lone "…", or a letter or
+    /// two, which says nothing a mark alone doesn't; it shows the mark
+    /// alone instead.
+    static let tabTitleRoom: CGFloat = 36
+    /// A sign before the title (a blocked window, a translation), framed
+    /// this wide; the bare ones (a script's flask, a private eye, the
+    /// recording dot) are a symbol of 9 or 10 points, about tabGlyph.
+    static let tabSign: CGFloat = 17
+    static let tabGlyph: CGFloat = 12
+    /// 104: narrower than this a tab is its mark alone.
+    static let tabTitled: CGFloat = tabFixed + tabTitleRoom
     static let tabMinWidth: CGFloat = 36
     static let tabGap: CGFloat = 2
     /// A pinned tab is a square the height of the row, holding one letter.
@@ -208,6 +242,9 @@ enum Metrics {
     /// The column of titles down the left, in the way that has one.
     static let side: CGFloat = 232
     static let sideMin: CGFloat = 176
+    /// Narrower than this, with Narrow to icons on, the column is the strip
+    /// of icons (Preferences.narrowStrip).
+    static let narrowLine: CGFloat = 200
     static let sideMax: CGFloat = 440
 }
 

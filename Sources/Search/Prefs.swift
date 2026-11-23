@@ -247,6 +247,12 @@ final class Preferences: ObservableObject {
     @Published var doorsUp: Bool {
         didSet { store.set(doorsUp, forKey: "sidebar.doorsUp") }
     }
+    /// A door right of the window's buttons that folds the column away, as
+    /// ⌘S does (see FoldDoor). Only with titles in the column; off unless
+    /// asked for.
+    @Published var foldButton: Bool {
+        didSet { store.set(foldButton, forKey: "sidebar.foldButton") }
+    }
     /// The column as icons only: each tab its site's mark, no titles, a
     /// fixed narrow width, and nothing that grows under the pointer (idea
     /// 413). Off unless asked for; Settings › Appearance › Tabs, Icons only.
@@ -263,11 +269,31 @@ final class Preferences: ObservableObject {
     /// and not with the column kept folded, where ⌘S is what brings it out
     /// to stay (see Fold.swift).
     var shrinks: Bool { sidebar && foldsToIcons && !sideHides }
-    /// Whether the column is showing as icons now: down a side, and asked for.
-    var iconColumn: Bool { sidebar && sideIcons }
+    /// Pulled narrower than Metrics.narrowLine, the column becomes a strip
+    /// of the sites' marks with its buttons, and pulled back out it has its
+    /// titles again: under that width the rows' titles, the lights' row and
+    /// the foot ran into each other. Off unless asked for; Settings ›
+    /// Appearance › Tabs.
+    @Published var narrowsToIcons: Bool {
+        didSet { store.set(narrowsToIcons, forKey: "sidebar.narrowIcons") }
+    }
+    /// Whether the column was last let go of as that strip. Kept, so it is
+    /// still a strip after a relaunch.
+    @Published var narrowed: Bool {
+        didSet { store.set(narrowed, forKey: "sidebar.narrowed") }
+    }
+    /// The strip it narrows to: the column of icons, without back, forward
+    /// and reload, its buttons where Buttons at the top puts them.
+    var narrowStrip: Bool { sidebar && !sideIcons && narrowsToIcons && narrowed }
+    /// Whether the column is showing as icons now: down a side, and asked
+    /// for, or pulled narrow enough to become the strip.
+    var iconColumn: Bool { sidebar && sideIcons || narrowStrip }
     /// The column's width as drawn: fixed with icons only, pulled by its
-    /// edge otherwise (the width pulled is kept for when titles come back).
-    var columnWidth: CGFloat { iconColumn ? Metrics.iconColumn : sideWidth }
+    /// edge otherwise (the width pulled is kept for when titles come back),
+    /// and never under the line while narrowing to the strip is on.
+    var columnWidth: CGFloat {
+        iconColumn ? Metrics.iconColumn : narrowsToIcons ? max(Metrics.narrowLine, sideWidth) : sideWidth
+    }
     /// A tab playing sound out of sight shows at the foot of the sidebar,
     /// with its pause (see Player.swift). Off unless asked for.
     @Published var showsPlayer: Bool {
@@ -384,6 +410,21 @@ final class Preferences: ObservableObject {
     @Published var dimsSleepingTabs: Bool {
         didSet { store.set(dimsSleepingTabs, forKey: "tabs.sleep.dim") }
     }
+    /// Back, forward and reload, each hidden on its own, for whoever uses
+    /// the keys: the tabs get the room (idea 815). Shown unless hidden.
+    @Published var hidesBack: Bool { didSet { store.set(hidesBack, forKey: "helm.back.hidden") } }
+    @Published var hidesForward: Bool { didSet { store.set(hidesForward, forKey: "helm.forward.hidden") } }
+    @Published var hidesReload: Bool { didSet { store.set(hidesReload, forKey: "helm.reload.hidden") } }
+    /// How many of back, forward and reload are shown.
+    var helmDoors: Int { [hidesBack, hidesForward, hidesReload].filter { !$0 }.count }
+    /// The buttons at the column's foot (and the strip's end), each hidden on
+    /// its own: the extensions' puzzle, bookmarks and the profile (idea 426).
+    /// Shown unless hidden. A pinned extension keeps its button.
+    @Published var hidesExtensionsDoor: Bool { didSet { store.set(hidesExtensionsDoor, forKey: "foot.extensions.hidden") } }
+    @Published var hidesBookmarksDoor: Bool { didSet { store.set(hidesBookmarksDoor, forKey: "foot.bookmarks.hidden") } }
+    @Published var hidesProfileDoor: Bool { didSet { store.set(hidesProfileDoor, forKey: "foot.profile.hidden") } }
+    /// The profile's badge is drawn: several profiles, and not hidden.
+    var showsProfileDoor: Bool { Profiles.shared.several && !hidesProfileDoor }
     /// Tabs you haven't pinned, named or grouped close once left alone this
     /// long, as in Arc. Never unless asked for.
     @Published var tabLife: TabLife {
@@ -501,6 +542,12 @@ final class Preferences: ObservableObject {
     /// turned off.
     @Published var showsAddress: Bool {
         didSet { store.set(showsAddress, forKey: "tabs.address") }
+    }
+    /// A click on the tab you're on opens its address to edit and nothing
+    /// else: no site card under it. Site Information… in the tab's menu
+    /// still shows the card. Off unless turned on (idea 951).
+    @Published var tabClickAddressOnly: Bool {
+        didSet { store.set(tabClickAddressOnly, forKey: "tabs.clickAddressOnly") }
     }
     /// The ad blocker. On unless turned off; there is nothing else to it.
     @Published var shielded: Bool {
@@ -682,6 +729,14 @@ final class Preferences: ObservableObject {
             AutoScroll.on = autoScroll
         }
     }
+    /// A mouse wheel's notches glide instead of jumping (see WheelGlide.swift).
+    /// Off unless asked for.
+    @Published var wheelGlides: Bool {
+        didSet {
+            store.set(wheelGlides, forKey: "wheel.smooth")
+            WheelGlide.on = wheelGlides
+        }
+    }
     /// Pages bounce at their top and bottom, as in Safari, rather than stop
     /// there (see Swipe.calm). Off unless asked for.
     @Published var bounces: Bool {
@@ -829,6 +884,17 @@ final class Preferences: ObservableObject {
     @Published var bookmarksBar: Bool {
         didSet { store.set(bookmarksBar, forKey: "bookmarks.bar") }
     }
+    /// The bookmarks bar at the top of the column instead of above the page:
+    /// a row for each of its bookmarks and folders, in every space, before
+    /// the pinned rows. Off unless asked for; Settings › Appearance › Tabs.
+    @Published var bookmarksInSidebar: Bool {
+        didSet { store.set(bookmarksInSidebar, forKey: "bookmarks.side") }
+    }
+    /// Whether the bookmarks bar is in the column now: the bar shown, asked
+    /// for there, and the tabs down a side. With the bar hidden it is hidden
+    /// in the column too (Show Bookmarks Bar still says where it is); with
+    /// the tabs across the top it stays above the page, where it always was.
+    var sideBookmarks: Bool { sidebar && bookmarksBar && bookmarksInSidebar }
     /// Where a link goes, at the bottom of the page while the pointer is on
     /// it (see StatusLine.swift). On unless turned off.
     @Published var showsLinks: Bool {
@@ -1033,6 +1099,11 @@ final class Preferences: ObservableObject {
         aiModels[provider.rawValue] = name
     }
 
+    /// With the tabs folded away (⌘S), a line along the page's top while it
+    /// loads, as Arc's (idea 269). Off unless asked for.
+    @Published var showsLoadingLine: Bool {
+        didSet { store.set(showsLoadingLine, forKey: "fold.loadingLine") }
+    }
     /// Two pages share one place in the tab row.
     /// Always on since the Settings rework (Drice, 24 Oct 2026): it only
     /// adds a command, so there is no switch. Still a property, for the
@@ -1045,8 +1116,10 @@ final class Preferences: ObservableObject {
     /// code that asks and the tests that turn it off; never written.
     @Published var switcherKeys = true
     /// The page in front offered to your iPhone, iPad and other Macs
-    /// through Handoff (see Handoff.swift). Off unless asked for: its
-    /// address leaves this Mac, if only for your own devices.
+    /// through Handoff (see Handoff.swift). On for a new install once the
+    /// welcome is left, where its switch is in sight; off for an install
+    /// from before until asked for (SyncDefault.swift): its address leaves
+    /// this Mac, if only for your own devices.
     @Published var handoff: Bool {
         didSet { store.set(handoff, forKey: "handoff") }
     }
@@ -1063,6 +1136,12 @@ final class Preferences: ObservableObject {
     /// asked for.
     @Published var floatingNewTab: Bool {
         didSet { store.set(floatingNewTab, forKey: "newtab.floating") }
+    }
+    /// The field raised over a page (⌘T floating, ⌘L) centred on the whole
+    /// window and nearer the top, as Arc and Zen have it, rather than on
+    /// the page beside the column (idea 753). Off unless asked for.
+    @Published var fieldOnWindow: Bool {
+        didSet { store.set(fieldOnWindow, forKey: "field.window") }
     }
     /// The address field from any app, as Spotlight's comes: a key of your
     /// own raises it over the app in front, and Return opens what was typed
@@ -1100,6 +1179,9 @@ final class Preferences: ObservableObject {
     }
 
     init() {
+        // First of all: whether this is a new install, before anything here
+        // writes a line that would make it look like one from before.
+        SyncDefault.settle(store, ranBefore: SidebarDefault.ranBefore(in: Store.folder))
         Preferences.settleLittleLinks(in: store)
         navigationLeft = store.bool(forKey: "toolbar.left")
         compactStrip = store.bool(forKey: "tabs.compact")
@@ -1143,8 +1225,11 @@ final class Preferences: ObservableObject {
         slidesColumn = store.bool(forKey: Motion.slidesKey)
         roomyTabs = store.bool(forKey: "sidebar.roomy")
         doorsUp = store.bool(forKey: "sidebar.doorsUp")
+        foldButton = store.bool(forKey: "sidebar.foldButton")
         sideIcons = store.bool(forKey: "sidebar.icons")
         foldsToIcons = store.bool(forKey: "sidebar.foldIcons")
+        narrowsToIcons = store.bool(forKey: "sidebar.narrowIcons")
+        narrowed = store.bool(forKey: "sidebar.narrowed")
         showsPlayer = store.bool(forKey: "sidebar.player")
         let width = store.object(forKey: "sidebar.width") as? Double ?? Double(Metrics.side)
         sideWidth = min(Metrics.sideMax, max(Metrics.sideMin, CGFloat(width)))
@@ -1170,8 +1255,15 @@ final class Preferences: ObservableObject {
         popupSites = Set(store.stringArray(forKey: "privacy.popupSites") ?? [])
         sleepsTabs = store.object(forKey: "tabs.sleep") as? Bool ?? true
         dimsSleepingTabs = store.bool(forKey: "tabs.sleep.dim")
+        hidesBack = store.bool(forKey: "helm.back.hidden")
+        hidesForward = store.bool(forKey: "helm.forward.hidden")
+        hidesReload = store.bool(forKey: "helm.reload.hidden")
+        hidesExtensionsDoor = store.bool(forKey: "foot.extensions.hidden")
+        hidesBookmarksDoor = store.bool(forKey: "foot.bookmarks.hidden")
+        hidesProfileDoor = store.bool(forKey: "foot.profile.hidden")
         tabLife = TabLife(rawValue: store.integer(forKey: "tabs.close.after")) ?? .never
         sleepPace = SleepPace.chosen
+        showsLoadingLine = store.bool(forKey: "fold.loadingLine")
         lazyTabs = store.bool(forKey: "tabs.lazy")
         newTabAfterLast = store.bool(forKey: "tabs.newAfterLast")
         closeGoesBack = store.bool(forKey: "tabs.closeGoesBack")
@@ -1193,6 +1285,7 @@ final class Preferences: ObservableObject {
         // On for everyone who never touched it (Drice, 24 Oct 2026, on
         // Security's advice); a choice made before stands.
         showsAddress = store.object(forKey: "tabs.address") as? Bool ?? true
+        tabClickAddressOnly = store.bool(forKey: "tabs.clickAddressOnly")
         shielded = store.object(forKey: "shield") as? Bool ?? true
         let keeps = store.bool(forKey: "sites.keep")
         keepsSignIns = keeps
@@ -1272,6 +1365,7 @@ final class Preferences: ObservableObject {
         commandBar = store.bool(forKey: "commandbar")
         handoff = store.bool(forKey: "handoff")
         floatingNewTab = store.bool(forKey: "newtab.floating")
+        fieldOnWindow = store.bool(forKey: "field.window")
         launcher = store.bool(forKey: "launcher.on")
         launcherLittle = store.bool(forKey: "launcher.little")
         launcherKey = store.data(forKey: "launcher.key").flatMap { try? JSONDecoder().decode(LauncherKey.self, from: $0) }
@@ -1315,6 +1409,7 @@ final class Preferences: ObservableObject {
         asksSpaceForLinks = store.bool(forKey: "links.ask")
         linkChoices = (store.array(forKey: "links.ask.last") ?? []).compactMap(LinkChooser.Choice.init(plist:))
         bookmarksBar = store.bool(forKey: "bookmarks.bar")
+        bookmarksInSidebar = store.bool(forKey: "bookmarks.side")
         alwaysShowsDownloads = store.bool(forKey: "downloads.button")
         downloadsOpening = store.string(forKey: "downloads.open").flatMap(DownloadsOpening.init(rawValue:)) ?? .tab
         let links = store.object(forKey: "links.show") as? Bool ?? true
@@ -1332,6 +1427,9 @@ final class Preferences: ObservableObject {
         let scrolls = store.bool(forKey: "autoscroll")
         autoScroll = scrolls
         AutoScroll.on = scrolls
+        let glides = store.bool(forKey: "wheel.smooth")
+        wheelGlides = glides
+        WheelGlide.on = glides
         let bouncing = store.bool(forKey: "pages.bounce")
         bounces = bouncing
         Swipe.bounces = bouncing
@@ -1418,8 +1516,11 @@ final class Preferences: ObservableObject {
         take(\.slidesColumn, store.bool(forKey: Motion.slidesKey))
         take(\.roomyTabs, store.bool(forKey: "sidebar.roomy"))
         take(\.doorsUp, store.bool(forKey: "sidebar.doorsUp"))
+        take(\.foldButton, store.bool(forKey: "sidebar.foldButton"))
         take(\.sideIcons, store.bool(forKey: "sidebar.icons"))
         take(\.foldsToIcons, store.bool(forKey: "sidebar.foldIcons"))
+        take(\.narrowsToIcons, store.bool(forKey: "sidebar.narrowIcons"))
+        take(\.narrowed, store.bool(forKey: "sidebar.narrowed"))
         take(\.sideWidth, "sidebar.width", (store.object(forKey: "sidebar.width") as? Double).map { CGFloat($0) }
             .flatMap { (Metrics.sideMin...Metrics.sideMax).contains($0) ? $0 : nil }, or: Metrics.side)
         take(\.sidePanelWidth, "sidepanel.width", (store.object(forKey: "sidepanel.width") as? Double).map { CGFloat($0) }
@@ -1437,10 +1538,12 @@ final class Preferences: ObservableObject {
         Swipe.bounces = bounces
         take(\.glyph, "glyph", store.string(forKey: "glyph").flatMap(Glyph.init), or: .letters)
         take(\.tabsGive, store.bool(forKey: "tabs.give"))
+        take(\.tabClickAddressOnly, store.bool(forKey: "tabs.clickAddressOnly"))
         take(\.instantMotion, store.bool(forKey: Motion.instantKey))
         take(\.showsTabShortcuts, store.bool(forKey: "tabs.shortcuts"))
         take(\.spacesOnCommand, store.bool(forKey: Preferences.spacesOnCommandKey))
         take(\.bookmarksBar, store.bool(forKey: "bookmarks.bar"))
+        take(\.bookmarksInSidebar, store.bool(forKey: "bookmarks.side"))
         take(\.alwaysShowsDownloads, store.bool(forKey: "downloads.button"))
     }
 

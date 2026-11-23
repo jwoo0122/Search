@@ -5,6 +5,11 @@ import XCTest
 /// readable both ways, what is drawn, what may go where, and Arc's nested
 /// folders coming in nested. In memory only.
 final class PinFoldersTests: XCTestCase {
+    override class func setUp() {
+        TestWorld.enter()
+        super.setUp()
+    }
+
     private func def(_ letter: String, folder: UUID? = nil) -> PinDef {
         PinDef(id: UUID(), letter: letter, home: "https://\(letter.lowercased()).example/",
                title: letter, name: nil, listed: true, folder: folder)
@@ -177,6 +182,20 @@ final class PinFoldersTests: XCTestCase {
         let folders: [UUID: UUID?] = [b.id: work.id, a.id: nil]
         XCTAssertNil(PinTree.place(y: 80, lines: lines, folders: folders, carrying: a.id))
         XCTAssertNil(PinTree.place(y: 27, lines: lines, folders: folders, carrying: a.id))
+    }
+
+    /// The carried pin is drawn under the hand, its line measured there:
+    /// carried down over A, it is found over A too, and A still takes it
+    /// (#1406: it came first, and nothing moved).
+    func testThePinCarriedNeverHidesTheLineUnderIt() {
+        let work = folder("Work"), b = def("B", folder: work.id), a = def("A")
+        var lines = measured(work, b, a)
+        lines[1].frame.origin.y = 66
+        let folders: [UUID: UUID?] = [b.id: work.id, a.id: nil]
+        XCTAssertEqual(PinTree.place(y: 90, lines: lines, folders: folders, carrying: b.id),
+                       PinTree.Place(folder: nil, anchor: a.id, after: true))
+        XCTAssertEqual(PinTree.place(y: 75, lines: lines, folders: folders, carrying: b.id),
+                       PinTree.Place(folder: nil, anchor: a.id, after: false))
     }
 
     func testLetGoPastEitherEndGoesToTheTop() {

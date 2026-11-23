@@ -97,6 +97,7 @@ enum SettingsIndex {
         .init(id: "anywhere", page: .keyboard, title: "From any app", icon: "macwindow.on.rectangle"),
 
         .init(id: "updates", page: .about, title: "Updates", icon: "arrow.triangle.2.circlepath"),
+        .init(id: "news", page: .about, title: "News by email", icon: "envelope.open"),
         .init(id: "developer", page: .about, title: "Developer", icon: "hammer"),
 
         // Drawn by ExtensionsPage itself; here so the find field reaches it.
@@ -136,7 +137,7 @@ enum SettingsIndex {
               keys: ["handoff"], words: ["handoff", "continuity", "iphone", "ipad", "devices", "app switcher", "multitasking"]),
         .init(id: "icloud", group: "browser", icon: "icloud",
               title: "Sync with iCloud", detail: "Open tabs, pins, spaces, bookmarks and a few settings, with your iPhone",
-              more: "Through your own iCloud, end to end encrypted: Search on your iPhone and your other Macs see this Mac's open tabs (under History and in the address field, as Tabs on Your Other Devices) and share its pins, spaces, bookmarks, search engine and look. Private tabs never go, nor your history, passwords, cookies or sign-ins. Nothing leaves this Mac until you turn it on. Not together with Sync with your other Macs.",
+              more: "Through your own iCloud, end to end encrypted: Search on your iPhone and your other Macs see this Mac's open tabs (under History and in the address field, as Tabs on Your Other Devices) and share its pins, spaces, bookmarks, search engine and look. Private tabs never go, nor your history, passwords, cookies or sign-ins. On for a new Search once you leave the welcome, where its switch is, so it can be turned off first; off for a Search you had before until you turn it on. Nothing leaves this Mac while it's off. Not together with Sync with your other Macs.",
               keys: ["icloud.sync"], words: ["sync", "icloud", "iphone", "ios", "cloudkit", "other devices", "devices", "icloud tabs", "tabs on other devices", "handoff"]),
         .init(id: "icloud.erase", group: "browser", icon: "trash",
               title: "Delete Search's data from iCloud", detail: "For every device. What is on each one stays, and sync turns off here",
@@ -200,6 +201,10 @@ enum SettingsIndex {
               more: "Off, ⌘S hides the column and the page takes the whole window.",
               keys: ["sidebar.foldIcons"], words: ["collapse", "collapsed", "compact", "narrow", "hide sidebar", "icons only", "favicons"],
               parent: "tabs.layout"),
+        .init(id: "fold.loadingLine", group: "window", icon: "slider.horizontal.below.rectangle",
+              title: "A loading line with the tabs hidden", detail: "Folded away with ⌘S, a thin line along the page's top while it loads",
+              more: "With the tabs in sight, the ring on the tab says a page is loading; hidden, nothing did. The line runs as far as the page has come and goes once it is there.",
+              keys: ["fold.loadingLine"], words: ["loading", "progress", "bar", "spinner", "indicator", "hidden sidebar", "folded", "arc"]),
         .init(id: "layout.cards", group: "window", icon: "rectangle.inset.filled",
               title: "The page as a card", detail: "A little room around the page, with rounded corners",
               more: "Off, the page reaches the window's edges and the column is white with its hairline.",
@@ -244,6 +249,24 @@ enum SettingsIndex {
         .init(id: "sidebar.doorsUp", group: "tablook", icon: "rectangle.topthird.inset.filled",
               title: "Buttons at the top", detail: "Bookmarks, extensions and downloads beside back, forward and reload, when they fit",
               keys: ["sidebar.doorsUp"], words: ["minimal", "toolbar", "footer", "bottom", "icons", "clean"], parent: "tabs.layout"),
+        .init(id: "helm.shown", group: "tablook", icon: "arrow.left.arrow.right",
+              title: "Back, forward and reload", detail: "Untick any you reach with the keys: the tabs get the room",
+              more: "⌘[, ⌘] and ⌘R work whichever are shown. In the column they sit beside the window's buttons; across the top, at the row's end.",
+              keys: ["helm.back.hidden", "helm.forward.hidden", "helm.reload.hidden"],
+              words: ["toolbar", "buttons", "navigation", "hide", "back", "forward", "reload", "minimal", "clean"], kind: .wide),
+        .init(id: "foot.shown", group: "tablook", icon: "square.grid.3x1.below.line.grid.1x2",
+              title: "Buttons under the column", detail: "Untick extensions, bookmarks or your profile to hide its button",
+              more: "Across the top, the same buttons at the row's end. A pinned extension keeps its own button, and Bookmarks and Settings › Extensions are still in the menus.",
+              keys: ["foot.extensions.hidden", "foot.bookmarks.hidden", "foot.profile.hidden"],
+              words: ["toolbar", "buttons", "footer", "bottom", "hide", "extensions", "puzzle", "bookmarks", "profile", "customise", "customize", "minimal", "clean"], kind: .wide),
+        .init(id: "sidebar.foldButton", group: "tablook", icon: "sidebar.left",
+              title: "Sidebar button", detail: "Beside the window's buttons, to hide the sidebar as ⌘S does",
+              more: "With the sidebar hidden, ⌘S or the pointer at the window's edge brings it back; the button then keeps it out.",
+              keys: ["sidebar.foldButton"], words: ["hide sidebar", "collapse", "toggle", "fold", "traffic lights", "safari", "arc"], parent: "tabs.layout"),
+        .init(id: "sidebar.narrowIcons", group: "tablook", icon: "rectangle.leftthird.inset.filled",
+              title: "Narrow to icons", detail: "Pulled narrower than 200 points, the sidebar becomes a strip of site icons and its buttons",
+              more: "The strip keeps the space's colour and shows letters or icons as the tabs do. Back, forward and reload stay on their keys. Pull its edge back out, or press ⌘S, for titles again.",
+              keys: ["sidebar.narrowIcons"], words: ["collapse", "collapsed", "compact", "narrow", "thin", "strip", "icons only", "auto"], parent: "tabs.layout"),
         .init(id: "sidebar.player", group: "tablook", icon: "play.circle",
               title: "What's playing in other tabs", detail: "At the foot of the sidebar, to pause it, play it again or go to it",
               more: "A tab playing sound while you're on another one shows above the sidebar's foot.",
@@ -264,6 +287,11 @@ enum SettingsIndex {
         .init(id: "bookmarks.bar", group: "tablook", icon: "bookmark",
               title: "Show the bookmarks bar", detail: "Your bookmarks in a row above the page",
               keys: ["bookmarks.bar"], words: ["favorites bar"]),
+        .init(id: "bookmarks.side", group: "tablook", icon: "list.bullet.rectangle",
+              title: "Show the bookmarks bar in the sidebar", detail: "At the top of the sidebar in every space, instead of above the page",
+              more: "A row for each bookmark and folder on the bar, before your pinned rows. A folder opens as a menu, as on the bar.",
+              keys: ["bookmarks.side"], words: ["favorites bar", "bookmarks toolbar", "sidebar", "column", "folders"],
+              parent: "bookmarks.bar"),
         .init(id: "motion.light", group: "motion", icon: "leaf",
               title: "Save power in Low Power Mode", detail: "Simpler motion while saving power or running hot; idle tabs sleep sooner in Low Power Mode",
               more: "In Low Power Mode, or while the Mac runs hot. Pages are left as they are.",
@@ -335,6 +363,10 @@ enum SettingsIndex {
               title: "Show the address on the tab you're on", detail: "Its site in place of its title; the title comes back under the pointer",
               more: "Look-alike names in other alphabets show as they really are, and plain http says Not secure. Off, the tab you're on still says so for those two.",
               keys: ["tabs.address"], words: ["url", "domain", "security", "address bar"]),
+        .init(id: "tabs.clickAddressOnly", group: "tabbar", icon: "character.cursor.ibeam",
+              title: "Clicking the tab you're on edits its address only", detail: "Without the site card under it",
+              more: "Site Information… in the tab's menu still shows the card.",
+              keys: ["tabs.clickAddressOnly"], words: ["site card", "site information", "card", "popover", "click", "url", "edit address", "address bar"]),
         .init(id: "tabs.mirror", group: "tabwindows", icon: "rectangle.on.rectangle",
               title: "Same tabs in every window", detail: "Each window lists the same open tabs in a space, as it lists the same pins",
               more: "A tab opened, closed, moved, grouped or renamed in one window is so in the others. Each window shows the page on its own, so the same tab can be open in two windows at once. Private tabs stay in their window, and closing a window leaves its tabs in the others.",
@@ -478,6 +510,10 @@ enum SettingsIndex {
               title: "New tab in a floating field", detail: "⌘T raises the address field over the page, as in Arc",
               more: "Return opens what you typed in a new tab; Escape, ⌘W or a click outside puts it away.",
               keys: ["newtab.floating"], words: ["command bar", "cmd t", "spotlight"]),
+        .init(id: "field.window", group: "opening", icon: "rectangle.center.inset.filled",
+              title: "The field in the middle of the window", detail: "⌘T's and ⌘L's field over a page, centred on the window and higher up",
+              more: "As Arc and Zen place it, near where Spotlight comes: the column is dimmed with the page. Off, the field is centred on the page beside the column.",
+              keys: ["field.window"], words: ["command bar", "cmd t", "cmd l", "spotlight", "centre", "center", "position", "arc", "zen"]),
         .init(id: "newtab.recent", group: "opening", icon: "clock.arrow.circlepath",
               title: "Recent places in the new tab", detail: "Before you type, ⌘T's field lists the last three places you went",
               more: "From History on this Mac, leaving out pages already open, which ⌘K finds. Nothing is picked until an arrow key picks it, and a private tab lists nothing.",
@@ -564,6 +600,10 @@ enum SettingsIndex {
         .init(id: "autoscroll", group: "mouse", icon: "arrow.up.and.down.circle",
               title: "Scroll with the middle button", detail: "Click the wheel, then move the mouse to scroll, as on Windows",
               keys: ["autoscroll"], words: ["middle click", "autoscroll", "wheel"]),
+        .init(id: "wheel.smooth", group: "mouse", icon: "computermouse",
+              title: "Smooth scrolling with a mouse wheel", detail: "Each notch of the wheel glides over a few frames, as in Chrome, instead of jumping",
+              more: "A trackpad, and a mouse that scrolls smoothly on its own, are left as they are. With ⌘, ⌃ or ⌥ held a notch goes to the page as it comes, for zooming.",
+              keys: ["wheel.smooth"], words: ["smooth scrolling", "mouse wheel", "notch", "logitech", "jumpy", "choppy", "chrome"]),
         .init(id: "pages.bounce", group: "mouse", icon: "arrow.up.and.down",
               title: "Bounce at the top and bottom", detail: "A page stretches a little past its ends and springs back, as in Safari",
               keys: ["pages.bounce"], words: ["elastic", "rubber band", "overscroll", "bounce", "smooth scrolling", "safari"]),
@@ -594,6 +634,18 @@ enum SettingsIndex {
               title: "Found something wrong?", detail: "Opens a draft with the version already in it", words: ["bug", "feedback", "report"]),
         .init(id: "about.notes", group: "updates", icon: "sparkles",
               title: "What's new", detail: "Every version's notes, newest first", words: ["release notes", "changelog"]),
+        // An email field each, never sent without a press (OptIn.swift).
+        // Only booleans are kept, never the address.
+        .init(id: "news.updates", group: "news", icon: "envelope",
+              title: "News by email", detail: "Rare emails: useful new features and big updates, nothing else",
+              more: "Your email goes to searchbrowser.app with the word app-settings and which Mac download this is, and through Resend, our email service. Every email has a link to stop them. This Mac remembers only that you joined, never the address.",
+              keys: [OptIn.joinedKey],
+              words: ["newsletter", "email", "mailing list", "subscribe", "news", "updates by email"], kind: .wide),
+        .init(id: "news.iphone", group: "news", icon: "iphone",
+              title: "Search for iPhone beta", detail: "Ask for the iPhone beta, sent to your email",
+              more: "Your email goes to searchbrowser.app with the word app-settings, for your beta access and now and then news about the beta. Every email has a link to stop them. This Mac remembers only that you asked, never the address.",
+              keys: [OptIn.betaKey],
+              words: ["iphone", "ios", "beta", "testflight", "mobile", "phone", "email"], kind: .wide),
         .init(id: "bench", group: "developer", icon: "terminal",
               title: "Let a script drive Search", detail: "A local socket for testing; its tabs never take over",
               more: "Its tabs open beside yours with a flask on them. See ./bench.",
@@ -628,6 +680,12 @@ enum SettingsIndex {
               more: "Fewer sites means less memory on the rest. Right-click an extension's button to run it on the site you're on.",
               keys: ["extensions.sites"],
               words: ["site access", "sites", "permissions", "host", "on click", "activetab", "memory", "extension"],
+              kind: .note, findOnly: true),
+        .init(id: "extensions.safariApps", group: "extensions", icon: "safari",
+              title: "From Safari apps", detail: "Off unless you turn it on, at the foot of Settings › Extensions",
+              more: "Lists the Safari extensions that came inside apps in Applications, to add as unpacked extensions. Only their JavaScript runs: native messaging and content blockers don't work.",
+              keys: [SafariApps.key],
+              words: ["safari", "safari extension", "app extension", "appex", "mac app"],
               kind: .note, findOnly: true),
         .init(id: "note.awake", group: "memory", icon: "sun.max",
               title: "Keep selected sites awake", detail: "Always there: Keep This Site Awake, on the site's card",
@@ -694,7 +752,7 @@ enum SettingsIndex {
         switch item.id {
         case "pages.dusk": return prefs.look != .light
         case "inspector.dark": return prefs.look != .dark
-        case "sidebar.roomy", "sidebar.player", "sidebar.doorsUp": return prefs.sidebar && !prefs.sideIcons
+        case "sidebar.roomy", "sidebar.player", "sidebar.doorsUp", "sidebar.foldButton", "sidebar.narrowIcons": return prefs.sidebar && !prefs.sideIcons
         case "sidebar.hides", "sidebar.slides", "layout.cards", "pins.list": return prefs.sidebar
         case "layout.cardsFullScreen": return prefs.sidebar && prefs.cards
         case "address.width": return prefs.addressLine && !prefs.sidebar
@@ -704,6 +762,7 @@ enum SettingsIndex {
         case "window.glass.clear", "window.glass.grain": return prefs.glass && !prefs.usesSpaces
         case "pins.folders": return prefs.sidebar && prefs.listsPins
         case "sidebar.foldIcons": return prefs.sidebar && !prefs.sideHides
+        case "bookmarks.side": return prefs.sidebar && prefs.bookmarksBar
         case "toolbar.left", "tabs.compact": return !prefs.sidebar
         case "profiles.oneWindow": return Profiles.shared.several
         case "spaces.links", "links.ask", "spaces.buttons": return prefs.usesSpaces
@@ -724,7 +783,7 @@ enum SettingsIndex {
         case "pages.dusk": return "Only while Search isn't set to Light"
         case "inspector.dark": return "Only while Search isn't set to Dark"
         case "toolbar.left", "tabs.compact", "address.width": return "Only with the tabs across the top"
-        case "sidebar.roomy", "sidebar.doorsUp": return "Only with titles in the column"
+        case "sidebar.roomy", "sidebar.doorsUp", "sidebar.foldButton", "sidebar.narrowIcons": return "Only with titles in the column"
         case "tabs.liquid": return LiquidTab.available ? "Only with titles in the column, or the tabs across the top" : "Liquid Glass needs macOS 26"
         case "window.glass.style": return GlassStyle.liquidAvailable ? "Only with Glass on" : "Liquid Glass needs macOS 26"
         case "window.glass.clear", "window.glass.grain": return "With spaces on, in the space's menu › Colour…"
@@ -739,6 +798,7 @@ enum SettingsIndex {
         case "mail.default": return "Only with a webmail chosen for email links"
         case "links.peek.stays": return "Only when links or pins open peeks"
         case "launcher.key": return "Only with the address field from any app on"
+        case "bookmarks.side": return "Only with the bookmarks bar shown and the tabs down a side"
         default: return "Only with the tabs down a side"
         }
     }

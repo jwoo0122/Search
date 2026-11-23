@@ -40,8 +40,8 @@ It was built by a design studio that spends its whole day in a browser and was t
 On purpose:
 
 - No extension you have to install to feel at home. Blocking ads, hiding clutter, reading mode, picture-in-picture and passwords are built in; extensions are there for everything else.
-- No sync, no account, no cloud. Your tabs, history and passwords are on your Mac and nowhere else.
-- No telemetry, no analytics, no crash reports sent anywhere. The only things that leave your Mac are the pages you ask for, their icons, and one small request a day to see whether there is a newer version.
+- No account and no cloud of ours. Your history and passwords are on your Mac and nowhere else. Sync with iCloud keeps your open tabs, pins, spaces, bookmarks and a few settings in your own iCloud, end to end encrypted: on for a new install once you leave the welcome, where its switch is, and off for a Search you had before until you turn it on.
+- No telemetry, no analytics, no crash reports sent anywhere. The only things that leave your Mac are the pages you ask for, their icons, one small request a day to see whether there is a newer version, and, while they are on, Sync with iCloud and Handoff (below).
 - One window. Tabs are the only kind of "new" there is.
 
 ## Privacy, concretely
@@ -52,6 +52,9 @@ On purpose:
 | History, bookmarks, open tabs, hidden elements | Small JSON files in `~/Library/Application Support/Search/` | You. |
 | Cookies and site data | WebKit's own store for the app | The sites that set them, as in any browser. |
 | Extensions | Unpacked in `~/Library/Application Support/Search/Extensions/`, their data in WebKit's extension store | Each extension, within the permissions you accepted when adding it. |
+| News by email, the iPhone beta | Only if you type your email and press Join or Ask (the What's New card, the welcome, Settings › About): one HTTPS POST to searchbrowser.app with the address, where you pressed (`app-whats-new`, `app-welcome`, `app-settings`), which Mac download you have and, if ticked, that you want the iPhone beta. Your Mac keeps two yes/no flags, never the address. See `OptIn.swift`. | Office Commun, to send those emails through Resend; every one has a link to stop them, and hello@searchbrowser.app removes the address. |
+| Sync with iCloud | While it is on (Settings › General; on for a new install from the moment you leave the welcome, off for a Search you had before until you turn it on): open tabs, pins, spaces, bookmarks, your search engine and look, in Search's own zone of your private iCloud database, their contents end to end encrypted. Never private tabs, history, passwords, cookies or sign-ins. See `SYNC.md` and `ICloudSync.swift`. | You, on your devices signed in to your Apple Account. Not Office Commun: there is no server of ours. |
+| Handoff | While it is on (Settings › General; on for a new install from the moment you leave the welcome, off for a Search you had before until you turn it on): the address and title of the page in front, handed to macOS, which offers it to your iPhone, iPad and other Macs. Never a private tab. See `Handoff.swift`. | Your devices signed in to your Apple Account, through Apple's Handoff. |
 | Anything else | Nowhere. There is no server. | — |
 
 A **private tab** (`⇧⌘N`) has its own cookie jar and leaves nothing behind when it closes.
@@ -118,7 +121,15 @@ Turn on **Settings › General › Let a script drive Search** and the running a
 
 Bench tabs are never selected for you, never enter the session or the history, and go when the script says so. It is how this browser is tested while somebody is using it.
 
-A coding agent can drive it through `./bench-mcp`, an MCP server over the same socket: `claude mcp add search-bench -- "$PWD/bench-mcp"` (or `codex mcp add …`). Each session starts this checkout's `build/Search.app` hidden, in a test world of its own, and wipes that world when it closes; the browser you use is never in reach. Its tools read a page as roles and names, click with real mouse events, type and check what the field holds, and wait on a condition, and a handle that has gone stale or a button that is covered is an error, never a guess. `python3 Tests/bench_mcp.py` checks it end to end.
+An agent can drive an isolated copy of Search through `./bench-mcp`, an MCP server over the same socket. Run `./build.sh` from the repository root first, then register the server with your client:
+
+```sh
+claude mcp add search-bench -- "$PWD/bench-mcp"
+codex mcp add search-bench -- "$PWD/bench-mcp"
+agy mcp add --type stdio search-bench "$PWD/bench-mcp"
+```
+
+Each session starts this checkout's `build/Search.app` hidden, in a test world of its own, and wipes that world when it closes; the browser you use is never in reach. Its tools read a page as roles and names, or as an outline of its sections to open one at a time, click with real mouse events, type and check what the field holds, and wait on a condition, and a handle that has gone stale or a button that is covered is an error, never a guess. `python3 Tests/bench_mcp.py` checks it end to end.
 
 To let an agent use the Search you have open instead, turn on Settings › About › Developer › Let coding agents use Search, and give it `./search-mcp`: `claude mcp add search -- "$PWD/search-mcp"`. Search asks you in the window each time one connects, shows a pill with Stop while it is there, and keeps it to tabs of its own; the rules are in `Sources/Search/AgentControl.swift`, and `python3 Tests/agent_control.py` checks them in a hidden probe.
 
