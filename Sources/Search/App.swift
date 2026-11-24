@@ -16,13 +16,36 @@ struct SearchApp: App {
     @ObservedObject private var profiles = Profiles.shared
     /// Only for History's tabs on your other devices (Sync with iCloud).
     @ObservedObject private var icloud = ICloudSync.shared
+    /// Only for Help › Search for iPhone…, for now (IPhoneAsk.swift).
+    @ObservedObject private var iphoneAsk = IPhoneAskWatch.shared
     /// Links from other apps, and the Dock icon.
     @NSApplicationDelegateAdaptor(Links.self) private var links
 
     /// What the menus act on: the window in front's browser.
     private var browser: Browser { front.browser ?? SceneSlot.shared.browser }
 
+    /// A page open on another device, as History's menu lists it.
+    @ViewBuilder
+    private func elsewhere(_ page: DeviceTabs.Page) -> some View {
+        if let url = URL(string: page.url) {
+            Button {
+                browser.open(url, foreground: true)
+            } label: {
+                MenuLine(title: page.title.isEmpty ? Address.withoutWWW(page.url) : page.title, url: url)
+            }
+        }
+    }
+
     init() {
+        // AppKit's guess at password fields (#1458): every time a native
+        // field takes the keyboard (the address field, ⌘L, ⌘T…), it walks
+        // the window's key views back from it, and through SwiftUI that is
+        // a walk over every view in the window — the column with all its
+        // tabs and folders. On a full window it held the main thread at
+        // 100% for tens of seconds. Search fills its own passwords in
+        // pages; its own fields aren't sign-in forms. Registered, so kept
+        // in memory only: a `defaults write` still wins.
+        UserDefaults.standard.register(defaults: ["NSAutoFillHeuristicsEnabled": false])
         // Settings › General › Start with a fresh window: the files are cut
         // down before any window reads its row from them.
         if Store.settings.bool(forKey: Preferences.freshKey) {
@@ -257,12 +280,27 @@ struct SearchApp: App {
                     .shortcut("view.actualSize")
                 Divider()
                 // The Web Inspector, on the keys Chrome and Arc use (see Inspector.swift).
-                Button("Web Inspector") { browser.toggleInspector() }
-                    .shortcut("view.inspector")
-                Button("JavaScript Console") { browser.showConsole() }
-                    .shortcut("view.console")
-                Button("Inspect Element") { browser.inspectElement() }
-                    .shortcut("view.inspect")
+                // A developer tools package that inspects, when it is the one
+                // View › Developer uses, takes these three keys; Web
+                // Inspector stays here without them (DevToolsPackages.swift).
+                let taken = DevToolsPackages.shared.takenKeys
+                Button("Web Inspector") { browser.toggleWebInspector() }
+                    .shortcut(taken["devtools"] == nil ? "view.inspector" : nil)
+                Button("JavaScript Console") { browser.showWebConsole() }
+                    .shortcut(taken["console"] == nil ? "view.console" : nil)
+                Button("Inspect Element") { browser.inspectWebElement() }
+                    .shortcut(taken["pick"] == nil ? "view.inspect" : nil)
+                // Only with a developer tools package installed (Settings ›
+                // About › Developer, see DevToolsPackages.swift).
+                if let package = DevToolsPackages.shared.primary, DevToolsPackages.shared.usable(package.offer.id) {
+                    Menu("Developer") {
+                        ForEach(package.offer.menu, id: \.self) { item in
+                            Button(item.title) { DevToolsPackages.shared.open(item.id, in: browser) }
+                                .shortcut(taken[item.id])
+                        }
+                    }
+                    .disabled(!(browser.active?.isWeb ?? false) || browser.active?.page != nil)
+                }
                 // The system's own item, which replacing the toolbar group
                 // above took with it: ⌃⌘F did nothing (#1176). The key is
                 // the Mac's, never offered in Settings › Shortcuts.
@@ -412,14 +450,25 @@ struct SearchApp: App {
                 if icloud.on, !icloud.devices.isEmpty {
                     Section("Tabs on Your Other Devices") {
                         ForEach(icloud.devices, id: \.id) { device in
+                            // Its tab groups first, a menu each, as they
+                            // are on that device (idea 1093), then the rest.
                             Menu(ICloudSync.title(device.tabs)) {
-                                ForEach(device.tabs.tabs, id: \.self) { page in
-                                    if let url = URL(string: page.url) {
-                                        Button {
-                                            browser.open(url, foreground: true)
-                                        } label: {
-                                            MenuLine(title: page.title.isEmpty ? Address.withoutWWW(page.url) : page.title, url: url)
+                                ForEach(Array(device.tabs.sections.enumerated()), id: \.offset) { _, section in
+                                    if let group = section.group {
+                                        Menu(group.name.isEmpty ? "Group" : group.name) {
+                                            ForEach(section.pages, id: \.self) { page in elsewhere(page) }
+                                            if browser.prefs.usesTabGroups {
+                                                Divider()
+                                                Button("Open All in Tab Group") {
+                                                    let urls = section.pages.compactMap { URL(string: $0.url) }
+                                                    if let id = browser.openInTabGroup(urls, named: group.name), let colour = group.colour {
+                                                        browser.setTabGroupColour(id, to: colour)
+                                                    }
+                                                }
+                                            }
                                         }
+                                    } else {
+                                        ForEach(section.pages, id: \.self) { page in elsewhere(page) }
                                     }
                                 }
                             }
@@ -442,8 +491,15 @@ struct SearchApp: App {
                 Button("Clear History") { browser.clearHistory() }
                     .shortcut("history.clear")
             }
-            // Search › Check for Updates…, under About, as in any Mac app.
-            CommandGroup(after: .appInfo) { UpdateMenuItem() }
+            // Search › About Search, our own window with a What's New button
+            // (About.swift); then Check for Updates…, as in any Mac app, and
+            // What's New…, this version's card again (idea 968).
+            CommandGroup(replacing: .appInfo) {
+                Button("About Search") { AboutWindow.show() }
+                UpdateMenuItem()
+                Button("What's New…") { WhatsNew.showAgain(in: browser) }
+                    .disabled(WhatsNew.current == nil)
+            }
             CommandGroup(after: .appSettings) {
                 Button("Settings…") { browser.tuning = true }
                     .shortcut("app.settings")
@@ -452,7 +508,7 @@ struct SearchApp: App {
                 Button("Passwords…") { browser.managing = true }
                     .shortcut("app.passwords")
             }
-            QuitAndHelp()
+            QuitAndHelp(iphoneAsk: iphoneAsk.open)
         }
     }
 }
@@ -460,6 +516,9 @@ struct SearchApp: App {
 /// Quit Search, which can ask first (Settings › General), and Help. One
 /// value, because a scene's commands take at most ten.
 private struct QuitAndHelp: Commands {
+    /// Whether Help offers Search for iPhone… (IPhoneAsk.swift).
+    let iphoneAsk: Bool
+
     var body: some Commands {
         CommandGroup(replacing: .appTermination) {
             Button("Quit Search") {
@@ -469,6 +528,10 @@ private struct QuitAndHelp: Commands {
         }
         CommandGroup(replacing: .help) {
             Button("Send Feedback…") { Links.writeFeedback() }
+            // For now, until the iPhone beta opens (IPhoneAsk.swift).
+            if iphoneAsk {
+                Button(IPhoneAsk.menuTitle) { Browsers.frontBrowser.iphoneAsking = true }
+            }
         }
     }
 }
@@ -591,6 +654,7 @@ struct ContentView: View {
             // top and on the column's side in the room (see chrome). Two pages
             // side by side are a card each (see PaneStage).
             stage
+                .modifier(DevToolsStage(browser: browser))
                 .modifier(CardEdge(on: cards && !browser.prefs.splitView))
                 // The tabs folded away: a line says the page is coming
                 // (Settings, idea 269), clear of the card's round corners.
@@ -775,7 +839,7 @@ struct ContentView: View {
     /// aren't folded away or under a video filling the screen, and it isn't
     /// in the column instead (SideBookmarks).
     private var barShown: Bool {
-        browser.prefs.bookmarksBar && !browser.prefs.sideBookmarks && !browser.bookmarks.isEmpty && !browser.folded
+        browser.bookmarksBarForTab && !browser.prefs.sideBookmarks && !browser.bookmarks.isEmpty && !browser.folded
             && fullscreenTab == nil
     }
 
@@ -875,6 +939,8 @@ struct ContentView: View {
         } else if !browser.prefs.splitView {
             ZStack {
                 HomeGrid(browser: browser)
+                // The iPhone beta, a line under the field for now (IPhoneAsk.swift).
+                IPhoneAskNewTab(browser: browser)
                 Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true))
             }
             // Centred on the page, not on the window. The column of tabs
@@ -909,6 +975,15 @@ struct ContentView: View {
                 })
             } close: { browser.newsShowing = false }
         }
+        // Help › Search for iPhone… (see IPhoneAsk.swift).
+        if browser.iphoneAsking {
+            sheet {
+                IPhoneAskCard(close: { browser.iphoneAsking = false }, open: { url in
+                    browser.iphoneAsking = false
+                    _ = browser.open(url, foreground: true)
+                })
+            } close: { browser.iphoneAsking = false }
+        }
         if browser.reviewing {
             // No dimming for this one: the whole point is to keep looking at
             // the page while the list offers to put things back on it.
@@ -916,10 +991,8 @@ struct ContentView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture { browser.reviewing = false }
-                HiddenPanel(browser: browser)
-                    .padding(.top, Metrics.strip + 8)
-                    .padding(.trailing, 14)
-                    .transition(.scale(scale: 0.97, anchor: .topTrailing).combined(with: .opacity))
+                HiddenPanelPlace(browser: browser)
+                    .transition(.scale(scale: 0.97, anchor: .top).combined(with: .opacity))
             }
             .ignoresSafeArea()
             .transition(.opacity)
@@ -1105,6 +1178,7 @@ struct ContentView: View {
             .onChange(of: browser.activeID) { _, _ in handBack() }
             .animation(Motion.settle, value: browser.welcoming)
             .animation(Motion.settle, value: browser.newsShowing)
+            .animation(Motion.settle, value: browser.iphoneAsking)
             .animation(Motion.settle, value: browser.reviewing)
             .animation(Motion.settle, value: browser.styling)
         .onAppear {
@@ -1308,6 +1382,12 @@ struct ContentView: View {
             window.animationBehavior = .none
             window.isExcludedFromWindowsMenu = true
             window.orderOut(nil)
+        } else {
+            // SwiftUI leaves the window of a Window scene out of the Window
+            // menu, and so out of the Dock icon's list of windows and, it
+            // seems, ⌘`'s round: with a second window open, there was no
+            // going from one to the other there (idea 1047).
+            window.isExcludedFromWindowsMenu = false
         }
         window.tabbingMode = .disallowed
         // Light or dark is the app's to say (Settings › Appearance); the
@@ -1384,6 +1464,7 @@ struct ContentView: View {
                 // close a click on a tab's cross makes, on the way up, is.
                 guard let window, event.window === window else { return event }
                 Browser.lastClose = nil
+                Browser.lastMove = nil
                 // A click on the tab switcher, in this window only (see
                 // Browser.clickTabSwitcher), turned into the top-left
                 // coordinates SwiftUI's frames are in.
@@ -1424,6 +1505,7 @@ struct ContentView: View {
             // is the page's, which lets the pointer go on it, ahead of the
             // find bar, the field, or a full screen's Esc twice.
             if PointerLock.shared.escape(event) { return event }
+            if DevToolsPackages.keyDown(event, in: browser) { return nil }
             // Escape on a page filling the screen is WebKit's, which leaves
             // on the first one, as Safari does. Its window isn't a browser's,
             // so the key came here first and put away what was left up in
@@ -1495,7 +1577,7 @@ struct ContentView: View {
     /// acts on the key: ⌘W's own close is then the last.
     private static func keyed(_ event: NSEvent) {
         let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if flags != .command || event.shortcutCharacters != "z" { Browser.lastClose = nil }
+        if flags != .command || event.shortcutCharacters != "z" { Browser.lastClose = nil; Browser.lastMove = nil }
     }
 
     /// Each browser's key monitor. Kept here rather than in the view, so
@@ -1905,6 +1987,7 @@ struct ContentView: View {
         if ShortcutStore.shared.anyChanged || browser.prefs.usesSpaces, let combo = KeyCombo(event: event) {
             if let command = ShortcutStore.shared.customCommand(on: combo) {
                 if command.section == .spaces, !browser.prefs.usesSpaces { return false }
+                if command.section == .profiles, !Profiles.shared.several { return false }
                 if Command.split.contains(command.id), !browser.prefs.splitView { return false }
                 if Command.ai.contains(command.id), !browser.prefs.ai { return false }
                 if Command.dusk.contains(command.id), !browser.prefs.darkensPages { return false }
@@ -2083,9 +2166,16 @@ struct ContentView: View {
             // typed there to undo. Only once the page has left the key
             // unused (pageFirst): a document or a drawing keeps its own
             // undo. Not in a panel or another window.
-            guard browser.prefs.undoReopensTab, let window, event.window === window,
-                  browser.canUndoClose else { return false }
-            browser.undoClose()
+            // The same for a move of tabs into a folder or a group, or out
+            // of one (Browser.lastMove): all of them back in one step.
+            guard browser.prefs.undoReopensTab, let window, event.window === window else { return false }
+            if browser.canUndoMove {
+                browser.undoMove()
+            } else if browser.canUndoClose {
+                browser.undoClose()
+            } else {
+                return false
+            }
         // ⌘+ arrives as "=" or "+" depending on the keyboard; both mean bigger.
         case "=", "+":
             browser.zoom(by: 1.1)

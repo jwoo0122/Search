@@ -66,7 +66,8 @@ struct TabBar: View {
                 DragStrip(reserved: lights + dot + leading + (making ? min(540, row.room) : row.run) + Metrics.tabGap + Metrics.plusWidth, trailing: doors + 12,
                           band: making ? nil : TabBar.band, onDoubleClick: browser.newTab)
                 // And the corner the lights sit in, which is title bar too —
-                // the one stretch left to take hold of when tabs fill the row.
+                // with the stretch past the plus a full row still keeps
+                // (Metrics.tabRowHold), where to take hold when tabs fill it.
                 DragStrip()
                     .frame(width: lights)
 
@@ -266,6 +267,8 @@ struct TabBar: View {
                         // A coding agent allowed in this window: its pill and
                         // Stop, here rather than over the page (AgentBanner).
                         AgentStatus(browser: browser, style: .door)
+                        // A newer Search waiting (UpdateNotice).
+                        UpdateNoticePill(prefs: browser.prefs)
                         // Only while a download is running, and a moment after.
                         FetchDoor(browser: browser, fetches: browser.fetches)
                         ExtensionSlot(browser: browser, puzzle: !browser.prefs.hidesExtensionsDoor)
@@ -648,12 +651,13 @@ struct TabBar: View {
     }
 
     /// The strip, less the lights, the helm when it leads, the plus, the
-    /// doors at the far end and the air around them. The doors are measured;
+    /// stretch past it that moves the window (Metrics.tabRowHold), the doors
+    /// at the far end and the air around them. The doors are measured;
     /// until they have been, the helm and the bookmarks stand in for them —
     /// unless the helm leads, when nothing at the far end may be a real zero.
     private func room(in strip: CGFloat) -> CGFloat {
         let far = doors > 0 || browser.prefs.navigationLeft ? doors : Metrics.helm(browser.prefs) + 26
-        return max(0, strip - lights - dot - leading - 12 - Metrics.plusWidth - far - 3 * Metrics.tabGap)
+        return max(0, strip - lights - dot - leading - 12 - Metrics.plusWidth - Metrics.tabRowHold - far - 3 * Metrics.tabGap)
     }
 
     /// What the space's dot takes before the tabs, when there are spaces.
@@ -1014,6 +1018,10 @@ private struct TabPill: View, Equatable {
                     }
                 }
                 .frame(width: 16, height: 16)
+                // What its page counts as waiting (UnreadBadge): a pin shows
+                // no title to say it in.
+                .unreadBadge(prefs.showsPinCounts && !lettering && shortcutNumbers[tab.id] == nil ? tab.unread : nil, icon: 16,
+                             ring: live ? greys.pinLive : selected ? greys.wash : hovering ? greys.hover : greys.tile)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 6)
                 .frame(width: span)
@@ -1797,18 +1805,16 @@ struct TabMenu: View {
             // a drag onto a group takes them (see carried).
             let moving = browser.carried(with: tab)
             Menu("Move to Group") {
-                Button("New Group") {
-                    let id = browser.addTabGroup(containing: tab)
-                    for other in moving where other !== tab { browser.move(other, toGroup: id) }
-                }
+                // All of them at once, in their order: one step for ⌘Z.
+                Button("New Group") { browser.addTabGroup(containing: [tab] + moving.filter { $0 !== tab }) }
                 if !browser.tabGroups.isEmpty { Divider() }
                 ForEach(browser.tabGroups) { group in
-                    Button(group.name) { for each in moving { browser.move(each, toGroup: group.id) } }
+                    Button(group.name) { browser.move(moving, toGroup: group.id) }
                         .disabled(moving.allSatisfy { $0.groupID == group.id })
                 }
                 if moving.contains(where: { $0.groupID != nil }) {
                     Divider()
-                    Button("Remove from Group") { for each in moving { browser.move(each, toGroup: nil) } }
+                    Button("Remove from Group") { browser.move(moving, toGroup: nil) }
                 }
             }
         }
@@ -1829,6 +1835,7 @@ struct TabMenu: View {
             }
         } else if picked.allSatisfy({ $0.pin != nil }) {
             Button("Unpin \(count) Tabs") { for each in picked { browser.unpin(each) } }
+            pickedFolderMenu(picked)
         }
         if browser.prefs.usesSpaces, picked.allSatisfy({ !$0.bench && !$0.everywhere
                && $0.address.flatMap({ Browser.extensionHost(of: $0) }) == nil }) {
@@ -1883,6 +1890,32 @@ struct TabMenu: View {
             .disabled(browser.tabs.count <= count)
     }
 
+    /// Picked pinned rows, all of them into a folder, in their order (idea
+    /// 1092): only when every one of them can go in one.
+    @ViewBuilder
+    private func pickedFolderMenu(_ picked: [Tab]) -> some View {
+        if browser.prefs.showsPinFolders && picked.allSatisfy({ browser.takesFolder($0) }), let first = picked.first {
+            Button("New Folder with \(picked.count) Pins") {
+                browser.undoableMove {
+                    if let made = browser.newPinFolder(holding: first) { browser.movePins(picked, into: made) }
+                }
+            }
+            let folders = browser.pinFolders
+            if !folders.isEmpty {
+                Menu("Move to Folder") {
+                    ForEach(PinFolderMenu.entries(folders), id: \.folder.id) { entry in
+                        Button(entry.title) { browser.movePins(picked, into: entry.folder.id) }
+                            .disabled(picked.allSatisfy { $0.pinFolder == entry.folder.id })
+                    }
+                    if picked.contains(where: { $0.pinFolder != nil }) {
+                        Divider()
+                        Button("Remove from Folder") { browser.movePins(picked, into: nil) }
+                    }
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var singleMenu: some View {
         groupMenu
@@ -1913,7 +1946,7 @@ struct TabMenu: View {
                 Button("New Live Folder…") { LiveFolders.ask(for: browser, in: nil) }
             }
             if browser.prefs.showsPinFolders && browser.takesFolder(tab) {
-                Button("New Folder") { browser.newPinFolder(holding: tab) }
+                Button("New Folder") { browser.undoableMove { browser.newPinFolder(holding: tab) } }
                 Button("New Live Folder…") { LiveFolders.ask(for: browser, in: tab.pinFolder) }
                 let folders = browser.pinFolders
                 if !folders.isEmpty {
@@ -2049,11 +2082,8 @@ struct TabMenu: View {
         }
         .disabled(!tab.isWeb)
         // The card a click on the tab you are on shows under its address.
-        Button("Site Information…") {
-            if browser.activeID != tab.id { browser.select(tab) }
-            browser.beginTabEdit(tab, card: true)
-        }
-        .disabled(tab.isBlank || tab.address == nil || tab.pin != nil)
+        Button("Site Information…") { browser.showSiteInformation(tab) }
+            .disabled(!Browser.offersSiteInformation(tab))
         Button("Copy Address") {
             browser.select(tab)
             browser.copyAddress()
@@ -2335,25 +2365,42 @@ struct CloseClick: NSViewRepresentable {
 /// the middle button and nothing else: to a left click, a drag or a right
 /// click it isn't there, and the tab's own gestures and menu go on as before.
 struct MiddleClick: NSViewRepresentable {
+    /// A ⌘-click (the left button, ⌘ alone held) taken too: a folder of the
+    /// bookmarks bar, opened all at once as Chrome does (idea 959). Every
+    /// other left click goes through to what is under it.
+    var command = false
     let act: () -> Void
 
     func makeNSView(context: Context) -> NSView { Catch() }
 
     func updateNSView(_ view: NSView, context: Context) {
         (view as? Catch)?.act = act
+        (view as? Catch)?.command = command
     }
 
-    private final class Catch: NSView {
+    final class Catch: NSView {
         var act: () -> Void = {}
+        var command = false
         private var pressed = false
+
+        /// Whether it takes this event: the middle button's, or with
+        /// `command` a ⌘-click's.
+        static func takes(_ event: NSEvent?, command: Bool) -> Bool {
+            guard let event else { return false }
+            switch event.type {
+            case .otherMouseDown, .otherMouseUp:
+                return event.buttonNumber == 2
+            case .leftMouseDown, .leftMouseUp:
+                return command && event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command
+            default:
+                return false
+            }
+        }
 
         /// Asked about every event that lands on the tab, the pointer moving
         /// over it included; the one being delivered is the one to judge by.
         override func hitTest(_ point: NSPoint) -> NSView? {
-            guard let event = NSApp.currentEvent,
-                  event.type == .otherMouseDown || event.type == .otherMouseUp,
-                  event.buttonNumber == 2
-            else { return nil }
+            guard Catch.takes(NSApp.currentEvent, command: command) else { return nil }
             return super.hitTest(point)
         }
 
@@ -2368,6 +2415,17 @@ struct MiddleClick: NSViewRepresentable {
             guard pressed else { return }
             pressed = false
             if bounds.contains(convert(event.locationInWindow, from: nil)) { act() }
+        }
+
+        /// A ⌘-click, taken back the same way.
+        override func mouseDown(with event: NSEvent) {
+            guard command else { return super.mouseDown(with: event) }
+            pressed = true
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard command else { return super.mouseUp(with: event) }
+            otherMouseUp(with: event)
         }
     }
 }

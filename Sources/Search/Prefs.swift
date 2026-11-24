@@ -322,6 +322,14 @@ final class Preferences: ObservableObject {
     @Published var addressLine: Bool {
         didSet { store.set(addressLine, forKey: "address.shown") }
     }
+    /// Scroll bars fade away when nothing is scrolling, whatever the Mac is
+    /// set to (see Scrollbars.swift). Off unless asked for.
+    @Published var scrollbarsFade: Bool {
+        didSet {
+            store.set(scrollbarsFade, forKey: "scrollbars.fade")
+            Scrollbars.fade = scrollbarsFade
+        }
+    }
     /// How wide it is before the tabs across the top.
     @Published var addressWidth: AddressWidth {
         didSet { store.set(addressWidth.rawValue, forKey: "address.width") }
@@ -361,6 +369,12 @@ final class Preferences: ObservableObject {
     }
     @Published var customEngine: String {
         didSet { store.set(customEngine, forKey: "search.custom") }
+    }
+    /// A custom engine's own suggestions, when it has them: an https address
+    /// with %s where the words go (see EngineSuggest.swift). Empty, and it
+    /// has none, as a custom engine always did.
+    @Published var customSuggest: String {
+        didSet { store.set(customSuggest, forKey: "search.customSuggest") }
     }
     /// Where Shift-Return in the address field sends the words instead of
     /// the default engine (#848). Nil, as for anyone who never picks one:
@@ -532,6 +546,12 @@ final class Preferences: ObservableObject {
     @Published var showsReading: Bool {
         didSet { store.set(showsReading, forKey: "tabs.reading") }
     }
+    /// The count a page puts at the front of its title — "(3) WhatsApp" —
+    /// as a badge on its pin, which shows no title (UnreadBadge). Off unless
+    /// asked for.
+    @Published var showsPinCounts: Bool {
+        didSet { store.set(showsPinCounts, forKey: "tabs.pinCounts") }
+    }
     /// Tab titles in full ink (black or white) instead of the soft greys
     /// used for tabs that aren't the one you're on. Off unless asked for.
     @Published var highContrastText: Bool {
@@ -548,6 +568,14 @@ final class Preferences: ObservableObject {
     /// still shows the card. Off unless turned on (idea 951).
     @Published var tabClickAddressOnly: Bool {
         didSet { store.set(tabClickAddressOnly, forKey: "tabs.clickAddressOnly") }
+    }
+    /// With the address bar always shown, a click on the tab you're on
+    /// leaves it as it is, its name in the row: the address is edited in
+    /// the bar, or with ⌘L. Only while that bar is in sight, so the address
+    /// is always one click away (see Browser.clickKeepsTabName). Off unless
+    /// turned on (idea 1076).
+    @Published var tabClickKeepsName: Bool {
+        didSet { store.set(tabClickKeepsName, forKey: "tabs.clickKeepsName") }
     }
     /// The ad blocker. On unless turned off; there is nothing else to it.
     @Published var shielded: Bool {
@@ -619,6 +647,15 @@ final class Preferences: ObservableObject {
     /// Put a kept name and password into a sign-in as soon as one appears.
     @Published var fillsPasswords: Bool {
         didSet { store.set(fillsPasswords, forKey: "passwords.fill") }
+    }
+    /// Touch ID, or the Mac's password, before one of Search's own kept
+    /// passwords goes into a page (Vault.FillProof, idea 993). Off unless
+    /// turned on.
+    @Published var asksBeforeFilling: Bool {
+        didSet {
+            store.set(asksBeforeFilling, forKey: "passwords.fill.prove")
+            Vault.FillProof.forget()
+        }
     }
     /// Your card in Contacts under the boxes for your name, email, phone and
     /// address (MeCard). Off unless turned on, which is when macOS asks.
@@ -729,6 +766,14 @@ final class Preferences: ObservableObject {
             AutoScroll.on = autoScroll
         }
     }
+    /// Space and ← → play, pause and seek a clicked video showing the
+    /// browser's controls (see VideoKeys.swift). Off unless asked for.
+    @Published var videoKeys: Bool {
+        didSet {
+            store.set(videoKeys, forKey: "video.keys")
+            VideoKeys.on = videoKeys
+        }
+    }
     /// A mouse wheel's notches glide instead of jumping (see WheelGlide.swift).
     /// Off unless asked for.
     @Published var wheelGlides: Bool {
@@ -837,10 +882,12 @@ final class Preferences: ObservableObject {
     @Published var webmail: Webmail {
         didSet { store.set(webmail.rawValue, forKey: "mail.webmail") }
     }
-    /// With those small windows on: a link to a page already open in a tab
-    /// goes to that tab instead (see Links.little). Off unless asked for.
-    @Published var littleFindsTabs: Bool {
-        didSet { store.set(littleFindsTabs, forKey: "links.little.tabs") }
+    /// A link from another app to a page already open in a tab goes to that
+    /// tab instead of a new tab or a small window (see Links.little). Off
+    /// unless asked for. The key is from when it worked only with small
+    /// windows on, kept so a switch already turned on stays on.
+    @Published var linksFindTabs: Bool {
+        didSet { store.set(linksFindTabs, forKey: "links.little.tabs") }
     }
     /// Links to chosen sites open in their space (see SpaceRoutes.swift).
     /// Off unless asked for, and only with spaces on.
@@ -859,6 +906,11 @@ final class Preferences: ObservableObject {
     /// Which site goes to which space, for that.
     @Published var spaceRoutes: [SpaceRoute] {
         didSet { store.set(spaceRoutes.map(\.plist), forKey: SpaceRoutes.rulesKey) }
+    }
+    /// The space a link from another app opens in when no rule names its
+    /// site. Nil, as before, for the current space.
+    @Published var spaceForOtherLinks: UUID? {
+        didSet { store.set(spaceForOtherLinks?.uuidString, forKey: SpaceRoutes.otherKey) }
     }
     /// With links from other apps: ask which space each opens in, before it
     /// loads (see LinkChooser.swift). Off unless asked for.
@@ -890,11 +942,23 @@ final class Preferences: ObservableObject {
     @Published var bookmarksInSidebar: Bool {
         didSet { store.set(bookmarksInSidebar, forKey: "bookmarks.side") }
     }
+    /// The bookmarks bar above the page only while the tab on screen is a
+    /// new one, as Chrome's and Edge's "Only on new tab" (idea 1082). Off
+    /// unless asked for.
+    @Published var bookmarksNewTabOnly: Bool {
+        didSet { store.set(bookmarksNewTabOnly, forKey: "bookmarks.newTabOnly") }
+    }
     /// Whether the bookmarks bar is in the column now: the bar shown, asked
     /// for there, and the tabs down a side. With the bar hidden it is hidden
     /// in the column too (Show Bookmarks Bar still says where it is); with
     /// the tabs across the top it stays above the page, where it always was.
     var sideBookmarks: Bool { sidebar && bookmarksBar && bookmarksInSidebar }
+    /// Every bookmark on the bar above the page as its icon alone, its name
+    /// on hover, as Edge's "Show icons only" and Vivaldi's "Icon only" do
+    /// (idea 980). Folders keep their names. Off unless asked for.
+    @Published var bookmarksIconsOnly: Bool {
+        didSet { store.set(bookmarksIconsOnly, forKey: "bookmarks.iconsOnly") }
+    }
     /// Where a link goes, at the bottom of the page while the pointer is on
     /// it (see StatusLine.swift). On unless turned off.
     @Published var showsLinks: Bool {
@@ -994,6 +1058,17 @@ final class Preferences: ObservableObject {
             if installsUpdates { Updater.shared.install() }
         }
     }
+    /// "Update ready" at the foot of the column, or a pill at the far end
+    /// of the strip, while a newer build waits (UpdateNotice.swift). On
+    /// unless switched off: it only shows when an update is really there.
+    @Published var showsUpdateReady: Bool {
+        didSet { store.set(showsUpdateReady, forKey: UpdateNotice.key) }
+    }
+    /// The build whose notice was put away (its × or Hide): hidden until a
+    /// newer one is ready. 0 for none.
+    @Published var updateHiddenBuild: Int {
+        didSet { store.set(updateHiddenBuild, forKey: UpdateNotice.hiddenKey) }
+    }
     /// Separate sets of tabs, each with its own sign-ins (see Spaces.swift).
     /// Off unless asked for.
     @Published var usesSpaces: Bool {
@@ -1044,6 +1119,14 @@ final class Preferences: ObservableObject {
     /// tab selection.
     @Published var pinCommandOpensTab: Bool {
         didSet { store.set(pinCommandOpensTab, forKey: "pins.commandNewTab") }
+    }
+    /// A plain click on a link in a pinned tab, loose or in a pin folder,
+    /// opens the page in a new tab among the loose ones rather than in the
+    /// pin (idea 1039). Only a click taking the pin to another page: a
+    /// redirect, a form, a jump within the page and the site's own sign-in
+    /// pages stay in the pin (see Browser.leavesPin). Off unless asked for.
+    @Published var pinLinksOpenTabs: Bool {
+        didSet { store.set(pinLinksOpenTabs, forKey: "pins.linksNewTab") }
     }
     /// A pin's ⌘ number pressed again, on that pin, goes back to the tab
     /// you were on before it.
@@ -1236,6 +1319,9 @@ final class Preferences: ObservableObject {
         cards = store.object(forKey: "layout.cards") as? Bool ?? true
         cardsInFullScreen = store.bool(forKey: "layout.cardsFullScreen")
         addressLine = store.bool(forKey: "address.shown")
+        let fades = store.bool(forKey: "scrollbars.fade")
+        scrollbarsFade = fades
+        Scrollbars.fade = fades
         addressWidth = store.string(forKey: "address.width").flatMap(AddressWidth.init) ?? .small
         glass = store.bool(forKey: "window.glass")
         glassGrain = (store.object(forKey: "window.glass.grain") as? Double).map { min(1, max(0, $0)) } ?? 0.2
@@ -1245,6 +1331,7 @@ final class Preferences: ObservableObject {
         glyph = store.string(forKey: "glyph").flatMap(Glyph.init) ?? .letters
         engine = store.string(forKey: "search.engine").flatMap(Engine.init) ?? .standard
         customEngine = store.string(forKey: "search.custom") ?? ""
+        customSuggest = store.string(forKey: "search.customSuggest") ?? ""
         shiftEngine = store.string(forKey: "search.shift").flatMap(Engine.init)
         shiftCustom = store.string(forKey: "search.shiftCustom") ?? ""
         keywords = store.data(forKey: "search.keywords")
@@ -1281,11 +1368,13 @@ final class Preferences: ObservableObject {
         siteNotifications = store.object(forKey: "notifications.ask") as? Bool ?? true
         showsTabShortcuts = store.bool(forKey: "tabs.shortcuts")
         showsReading = store.bool(forKey: "tabs.reading")
+        showsPinCounts = store.bool(forKey: "tabs.pinCounts")
         highContrastText = store.bool(forKey: "tabs.highContrast")
         // On for everyone who never touched it (Drice, 24 Oct 2026, on
         // Security's advice); a choice made before stands.
         showsAddress = store.object(forKey: "tabs.address") as? Bool ?? true
         tabClickAddressOnly = store.bool(forKey: "tabs.clickAddressOnly")
+        tabClickKeepsName = store.bool(forKey: "tabs.clickKeepsName")
         shielded = store.object(forKey: "shield") as? Bool ?? true
         let keeps = store.bool(forKey: "sites.keep")
         keepsSignIns = keeps
@@ -1338,6 +1427,7 @@ final class Preferences: ObservableObject {
         asksWhereToSave = store.bool(forKey: "downloads.ask")
         savesPasswords = store.object(forKey: "passwords.save") as? Bool ?? true
         fillsPasswords = store.object(forKey: "passwords.fill") as? Bool ?? true
+        asksBeforeFilling = store.bool(forKey: "passwords.fill.prove")
         applePasswords = store.bool(forKey: "passwords.apple")
         let contacts = store.bool(forKey: "contacts.fill")
         fillsContacts = contacts
@@ -1351,6 +1441,7 @@ final class Preferences: ObservableObject {
         listsPins = store.bool(forKey: "pins.list")
         pinFolders = store.bool(forKey: "pins.folders")
         pinCommandOpensTab = store.bool(forKey: "pins.commandNewTab")
+        pinLinksOpenTabs = store.bool(forKey: "pins.linksNewTab")
         // "Pins keep their site" is one switch over two keys (see
         // SettingsIndex): on when either was on, on by default when neither
         // was ever touched (Drice, 24 Oct 2026), off when one was turned
@@ -1393,6 +1484,8 @@ final class Preferences: ObservableObject {
         translateTarget = store.string(forKey: "translate.target") ?? ""
         translateAlways = Set(store.stringArray(forKey: PageTranslator.alwaysKey) ?? [])
         installsUpdates = store.object(forKey: Updater.installKey) as? Bool ?? true
+        showsUpdateReady = store.object(forKey: UpdateNotice.key) as? Bool ?? true
+        updateHiddenBuild = store.integer(forKey: UpdateNotice.hiddenKey)
         peeksLinks = store.object(forKey: "links.peek") as? Bool ?? true
         peekClick = store.string(forKey: "links.peekClick").flatMap(PeekClick.init(rawValue:)) ?? .shift
         peekStays = store.bool(forKey: "links.peek.stays")
@@ -1401,15 +1494,18 @@ final class Preferences: ObservableObject {
         readsTwins = store.bool(forKey: "reader.twins")
         readerFollowsLook = store.bool(forKey: "reader.follows")
         littleLinks = store.bool(forKey: Preferences.littleKey)
-        littleFindsTabs = store.bool(forKey: "links.little.tabs")
+        linksFindTabs = store.bool(forKey: "links.little.tabs")
         webmail = store.string(forKey: "mail.webmail").flatMap(Webmail.init(rawValue:)) ?? .none
         sendsLinksToSpaces = store.bool(forKey: SpaceRoutes.key)
         spaceButtons = store.bool(forKey: Preferences.spaceButtonsKey)
         spaceRoutes = (store.array(forKey: SpaceRoutes.rulesKey) ?? []).compactMap(SpaceRoute.init(plist:))
+        spaceForOtherLinks = store.string(forKey: SpaceRoutes.otherKey).flatMap(UUID.init)
         asksSpaceForLinks = store.bool(forKey: "links.ask")
         linkChoices = (store.array(forKey: "links.ask.last") ?? []).compactMap(LinkChooser.Choice.init(plist:))
         bookmarksBar = store.bool(forKey: "bookmarks.bar")
         bookmarksInSidebar = store.bool(forKey: "bookmarks.side")
+        bookmarksIconsOnly = store.bool(forKey: "bookmarks.iconsOnly")
+        bookmarksNewTabOnly = store.bool(forKey: "bookmarks.newTabOnly")
         alwaysShowsDownloads = store.bool(forKey: "downloads.button")
         downloadsOpening = store.string(forKey: "downloads.open").flatMap(DownloadsOpening.init(rawValue:)) ?? .tab
         let links = store.object(forKey: "links.show") as? Bool ?? true
@@ -1427,6 +1523,9 @@ final class Preferences: ObservableObject {
         let scrolls = store.bool(forKey: "autoscroll")
         autoScroll = scrolls
         AutoScroll.on = scrolls
+        let videoKeys = store.bool(forKey: "video.keys")
+        self.videoKeys = videoKeys
+        VideoKeys.on = videoKeys
         let glides = store.bool(forKey: "wheel.smooth")
         wheelGlides = glides
         WheelGlide.on = glides
@@ -1528,6 +1627,7 @@ final class Preferences: ObservableObject {
         take(\.cards, "layout.cards", store.object(forKey: "layout.cards") as? Bool, or: true)
         take(\.cardsInFullScreen, store.bool(forKey: "layout.cardsFullScreen"))
         take(\.addressLine, store.bool(forKey: "address.shown"))
+        take(\.scrollbarsFade, store.bool(forKey: "scrollbars.fade"))
         take(\.addressWidth, "address.width", store.string(forKey: "address.width").flatMap(AddressWidth.init), or: .small)
         take(\.glass, store.bool(forKey: "window.glass"))
         take(\.glassGrain, "window.glass.grain", (store.object(forKey: "window.glass.grain") as? Double).map { min(1, max(0, $0)) }, or: 0.2)
@@ -1539,11 +1639,14 @@ final class Preferences: ObservableObject {
         take(\.glyph, "glyph", store.string(forKey: "glyph").flatMap(Glyph.init), or: .letters)
         take(\.tabsGive, store.bool(forKey: "tabs.give"))
         take(\.tabClickAddressOnly, store.bool(forKey: "tabs.clickAddressOnly"))
+        take(\.tabClickKeepsName, store.bool(forKey: "tabs.clickKeepsName"))
         take(\.instantMotion, store.bool(forKey: Motion.instantKey))
         take(\.showsTabShortcuts, store.bool(forKey: "tabs.shortcuts"))
         take(\.spacesOnCommand, store.bool(forKey: Preferences.spacesOnCommandKey))
         take(\.bookmarksBar, store.bool(forKey: "bookmarks.bar"))
         take(\.bookmarksInSidebar, store.bool(forKey: "bookmarks.side"))
+        take(\.bookmarksIconsOnly, store.bool(forKey: "bookmarks.iconsOnly"))
+        take(\.bookmarksNewTabOnly, store.bool(forKey: "bookmarks.newTabOnly"))
         take(\.alwaysShowsDownloads, store.bool(forKey: "downloads.button"))
     }
 

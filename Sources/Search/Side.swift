@@ -19,6 +19,7 @@ struct SideBar: View {
     @ObservedObject var browser: Browser
     @ObservedObject var prefs: Preferences
     @ObservedObject private var agents = AgentControl.shared
+    @ObservedObject private var updater = Updater.shared
     @Environment(\.colorScheme) private var colourScheme
     /// On the window's ground, beside the page's card (see CardEdge): the
     /// ground's colour and no edge of its own, the card's edge being the line.
@@ -117,15 +118,18 @@ struct SideBar: View {
     /// The window's buttons' corner: gone in full screen, where macOS takes
     /// them away, and back, forward and reload move up to the edge (idea 184).
     private var lights: CGFloat {
-        browser.fullScreen ? 0 : max(0, min(Metrics.sideLights, width - 20 - Metrics.helmDoors(prefs)))
+        SideBar.lights(width, fullScreen: browser.fullScreen, fold: fold, prefs: prefs)
     }
+    /// The fold door, where it fits (SideBar.folds).
+    private var fold: Bool { SideBar.folds(prefs, width: width, fullScreen: browser.fullScreen) }
 
     /// What is left of the lights' row right of back, forward and reload.
-    private var beyondHelm: CGFloat { SideBar.beyondHelm(width, fullScreen: browser.fullScreen, fold: prefs.foldButton, prefs: prefs) }
+    private var beyondHelm: CGFloat { SideBar.beyondHelm(width, fullScreen: browser.fullScreen, fold: fold, prefs: prefs) }
     /// The room right of the helm at the width let go at, for the doors up
     /// there: how many pinned extensions show, not changing under the pointer.
     private var upRoom: CGFloat {
-        max(SideBar.beyondHelm(prefs.columnWidth, fullScreen: browser.fullScreen, fold: prefs.foldButton, prefs: prefs), SideFoot.keptWidth(prefs, spaces: SpaceButtons.count(prefs, browser.spaces)))
+        max(SideBar.beyondHelm(prefs.columnWidth, fullScreen: browser.fullScreen,
+                               fold: SideBar.folds(prefs, width: prefs.columnWidth, fullScreen: browser.fullScreen), prefs: prefs), SideFoot.keptWidth(prefs, spaces: SpaceButtons.count(prefs, browser.spaces)))
     }
     private var doorsUp: Bool { SideBar.doorsUp(prefs, width: width, fullScreen: browser.fullScreen, spaces: SpaceButtons.count(prefs, browser.spaces)) }
     /// Where the doors are: up in the lights' row or down at the foot. Not
@@ -171,8 +175,21 @@ struct SideBar: View {
 
     /// `prefs`: back, forward and reload as Settings leaves them (idea 815).
     @MainActor static func beyondHelm(_ width: CGFloat, fullScreen: Bool, fold: Bool = false, prefs: Preferences) -> CGFloat {
-        let lights = fullScreen ? 0 : max(0, min(Metrics.sideLights, width - 20 - Metrics.helmDoors(prefs)))
-        return width - 20 - lights - foldDoor(fold) - Metrics.helm(prefs)
+        width - 20 - lights(width, fullScreen: fullScreen, fold: fold, prefs: prefs) - foldDoor(fold) - Metrics.helm(prefs)
+    }
+    /// The room left of the fold door, or of back, forward and reload, for
+    /// the window's buttons: what the row has after the doors, up to
+    /// sideLights. Not counting the fold door, it ran 30 points past the
+    /// column's end once narrowed, and the column, centred, slid its rows
+    /// off the left and the door under the zoom button (idea 1010).
+    @MainActor static func lights(_ width: CGFloat, fullScreen: Bool, fold: Bool, prefs: Preferences) -> CGFloat {
+        fullScreen ? 0 : max(0, min(Metrics.sideLights, width - 20 - Metrics.helmDoors(prefs) - foldDoor(fold)))
+    }
+    /// The fold door, when asked for, only where it fits clear of the zoom
+    /// button (Metrics.sideLightsLeast): narrower, it goes, as Safari's does,
+    /// and ⌘S and the column's menu still fold the column.
+    @MainActor static func folds(_ prefs: Preferences, width: CGFloat, fullScreen: Bool) -> Bool {
+        prefs.foldButton && (fullScreen || width - 20 - Metrics.helmDoors(prefs) - foldDoor(true) >= Metrics.sideLightsLeast)
     }
     /// The door that folds the column away, between the lights and back
     /// (FoldDoor), when it is asked for: one door and the air after it.
@@ -183,7 +200,7 @@ struct SideBar: View {
     /// doesn't send them all back down.
     @MainActor static func doorsUp(_ prefs: Preferences, width: CGFloat, fullScreen: Bool, spaces: Int = 0) -> Bool {
         prefs.doorsUp && prefs.sidebar && !prefs.iconColumn
-            && beyondHelm(width, fullScreen: fullScreen, fold: prefs.foldButton, prefs: prefs) >= SideFoot.keptWidth(prefs, spaces: spaces)
+            && beyondHelm(width, fullScreen: fullScreen, fold: folds(prefs, width: width, fullScreen: fullScreen), prefs: prefs) >= SideFoot.keptWidth(prefs, spaces: spaces)
     }
 
     var body: some View {
@@ -209,8 +226,8 @@ struct SideBar: View {
                         .frame(width: 10 + lights)
                     // Back, forward and reload's, as tall as they are: above
                     // and below them the band is still title bar.
-                    DragStrip(reserved: SideBar.foldDoor(prefs.foldButton) + Metrics.helm(prefs), band: 30, menu: columnMenu)
-                        .frame(width: SideBar.foldDoor(prefs.foldButton) + Metrics.helm(prefs))
+                    DragStrip(reserved: SideBar.foldDoor(fold) + Metrics.helm(prefs), band: 30, menu: columnMenu)
+                        .frame(width: SideBar.foldDoor(fold) + Metrics.helm(prefs))
                     // The doors, when they are up here, at its far end.
                     DragStrip(trailing: doorsTop ? upRoom + 10 : 0, menu: columnMenu)
                 }
@@ -236,7 +253,7 @@ struct SideBar: View {
                 } else {
                     HStack(spacing: 0) {
                         Color.clear.frame(width: lights)
-                        if prefs.foldButton {
+                        if fold {
                             FoldDoor(browser: browser, right: prefs.sidePosition == .right)
                                 .padding(.trailing, SideBar.foldDoor(true) - 26)
                         }
@@ -283,7 +300,8 @@ struct SideBar: View {
                 $0.modifier(EndInset(bottom: footHeight))
             }
             .padding(.bottom, (browser.player == nil ? 0 : rowHeight + SideBar.playerGap)
-                     + (agentHere && !icons ? SideBar.agentRow + SideBar.playerGap : 0))
+                     + (agentHere && !icons ? SideBar.agentRow + SideBar.playerGap : 0)
+                     + (updateHere ? rowHeight + SideBar.playerGap : 0))
 
             VStack(spacing: 0) {
                 Spacer()
@@ -298,6 +316,14 @@ struct SideBar: View {
                 }
                 if let tab = browser.player {
                     PlayerRow(browser: browser, prefs: prefs, tab: tab)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, SideBar.playerGap)
+                        .transition(.opacity)
+                }
+                // A newer Search waiting: "Update ready" and Restart, just
+                // above the doors (UpdateNotice).
+                if updateHere {
+                    UpdateNoticeRow(prefs: prefs)
                         .padding(.horizontal, 10)
                         .padding(.bottom, SideBar.playerGap)
                         .transition(.opacity)
@@ -1621,6 +1647,9 @@ struct SideBar: View {
     private static let playerGap: CGFloat = 4
     /// The agent's quiet line at the column's foot.
     private static let agentRow: CGFloat = 30
+    /// "Update ready" is showing at the foot (UpdateNotice); not in the
+    /// column of icons, where there is no room for its words.
+    private var updateHere: Bool { !icons && UpdateNotice.shown(updater, prefs) != nil }
     /// An agent's pill is showing in this window (AgentControl).
     private var agentHere: Bool { agents.shownIn == ObjectIdentifier(browser) }
 
@@ -1694,7 +1723,7 @@ private struct SideFoot: View {
                 // An agent connected in this window: a click on it is Stop.
                 AgentStatus(browser: browser, style: .icon)
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing, live: live)
-                ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0, puzzle: !prefs.hidesExtensionsDoor)
+                ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0, puzzle: !prefs.hidesExtensionsDoor, live: live)
                 if !prefs.hidesBookmarksDoor { BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing) }
                 SpaceButtons(browser: browser, vertical: true)
                 if prefs.usesSpaces && !prefs.showsSpaceButtons { SpaceDot(browser: browser) }
@@ -1713,15 +1742,15 @@ private struct SideFoot: View {
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: .bottom, live: live)
                 if !prefs.hidesBookmarksDoor { BookmarkDoor(browser: browser, arrowEdge: .bottom) }
                 SpaceButtons(browser: browser)
-                ExtensionSlot(browser: browser, edge: .bottom, room: room, puzzle: !prefs.hidesExtensionsDoor)
+                ExtensionSlot(browser: browser, edge: .bottom, room: room, puzzle: !prefs.hidesExtensionsDoor, live: live)
             }
         } else {
             HStack(spacing: 2) {
                 if prefs.showsProfileDoor { ProfileBadge(browser: browser) }
                 if prefs.usesSpaces && !prefs.showsSpaceButtons { SpaceDot(browser: browser) }
-                ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: room, puzzle: !prefs.hidesExtensionsDoor)
+                ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: room, puzzle: !prefs.hidesExtensionsDoor, live: live)
                 if !prefs.hidesBookmarksDoor { BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing) }
-                SpaceButtons(browser: browser)
+                SpaceButtons(browser: browser, squeezes: true)
                 // Only while a download is running, and a moment after.
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing, live: live)
                 // With a button per space the row is centred under the
@@ -1729,7 +1758,10 @@ private struct SideFoot: View {
                 // that had slid off. Otherwise at the side, as it always was.
                 if !prefs.showsSpaceButtons { Spacer(minLength: 0) }
             }
-            .frame(maxWidth: .infinity)
+            // The column's width and never more: wider, with a button per
+            // space, the column took the row's width, and centred slid its
+            // rows half the overflow off the left (idea 1010).
+            .frame(width: max(0, width - 2 * 10))
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
         }
@@ -1900,6 +1932,11 @@ private struct PinSquare: View, Equatable {
     /// stretching to chase the width.
     private var scale: CGFloat { min(width, height) }
 
+    /// The square's grey, as `background` paints it: the unread badge's ring.
+    private var squareGround: Color {
+        live ? greys.pinLive : selected ? greys.wash : hovering ? greys.hover : greys.tile
+    }
+
     /// The pin's letter: full ink with High contrast text, otherwise soft
     /// grey until the square is live or under the pointer.
     private var pinLetter: Color {
@@ -1926,6 +1963,10 @@ private struct PinSquare: View, Equatable {
             }
         }
         .frame(width: scale * 16 / 34, height: scale * 16 / 34)
+        // What its page counts as waiting, as a row's title would have said
+        // it: from the icon, not the square (UnreadBadge).
+        .unreadBadge(prefs.showsPinCounts && peek == nil && !lettering && shortcutNumbers[tab.id] == nil ? tab.unread : nil,
+                     icon: scale * 16 / 34, ring: squareGround)
         .frame(width: width, height: height)
         .background {
             Group {
@@ -1975,6 +2016,7 @@ private struct PinSquare: View, Equatable {
         .overlay { MiddleClick { browser.close(tab) } }
         .onHover { hovering = $0 }
         .contextMenu { TabMenu(browser: browser, tab: tab, close: { browser.close(tab) }) }
+        .background { if !inMap { SiteCardPanel.Square(id: tab.id) } }
         .help(tab.label)
         .animation(nil, value: hovering)
         .transition(.scale(scale: 0.8).combined(with: .opacity))
@@ -2101,6 +2143,9 @@ private struct SideRow: View, Equatable {
                             // A coding agent at work here: a dot on the
                             // icon's corner, the row as it was.
                             .overlay(alignment: .bottomTrailing) { AgentMark(tab: tab) }
+                            // A pinned row away from its page: the icon takes
+                            // it back (PinIconHome).
+                            .modifier(PinIconHome(browser: browser, tab: tab, enabled: interactive))
                     }
                     if tab.bench, !tab.agent {
                         // A script's tab, not yours.
@@ -2128,8 +2173,12 @@ private struct SideRow: View, Equatable {
                     TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
                                 size: prefs.sideTitle, colour: colour, roomy: true, dim: dim)
                 }
-                Spacer(minLength: 0)
             }
+            // Pushed to the leading edge by its frame, not a Spacer: the
+            // row's spacing before a Spacer kept the title 8 points further
+            // from the right edge than the icon is from the left, and a long
+            // title's ellipsis further still (idea 1032).
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 10)
             .padding(.trailing, status || peeking ? 0 : 10)
             .frame(height: prefs.sideRow)
