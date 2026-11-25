@@ -732,7 +732,8 @@ final class Bench {
                     "noisy": tab?.noisy ?? false, "sounding": browser.sounding.count])
 
         case "eval":
-            guard let tab = find(request, in: browser) else { answer(missing(request)); return }
+            // "little": true, in the newest small window's page.
+            guard let tab = page(request, in: browser) else { answer(missing(request)); return }
             guard let js = request["js"] as? String else { answer(["error": "eval needs js"]); return }
             house(tab)
             // Search's own world is where its page scripts live (see Web.world).
@@ -1444,7 +1445,23 @@ final class Bench {
                 if pressed.contains(where: { PageView.same($0, event) }) { resent += 1 }
                 return event
             }
-            PageHands.type(text, into: view) { pressed.append($0) }
+            // "code": one key by its code (51 is ⌫), with "mods" held:
+            // shift, option, command, control.
+            if let code = request["code"] as? Int {
+                var flags: NSEvent.ModifierFlags = []
+                for name in request["mods"] as? [String] ?? [] {
+                    switch name {
+                    case "shift": flags.insert(.shift)
+                    case "option": flags.insert(.option)
+                    case "command": flags.insert(.command)
+                    case "control": flags.insert(.control)
+                    default: break
+                    }
+                }
+                _ = PageHands.key(view, code: UInt16(code), characters: text, flags: flags) { pressed.append($0) }
+            } else {
+                PageHands.type(text, into: view) { pressed.append($0) }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 if let watch { NSEvent.removeMonitor(watch) }
                 answer(["typed": text, "sentBackUnused": resent, "quieted": PageView.quieted - before])
@@ -2764,6 +2781,19 @@ final class Bench {
             func state(_ extra: [String: Any] = [:]) -> [String: Any] {
                 var out: [String: Any] = ["joined": Bench.pair?.sync.joined ?? false,
                                           "records": (Bench.pair?.sync.ledger.values.keys.sorted() ?? [])]
+                // The open tabs as History › Tabs on Your Other Devices lists
+                // them (idea 1112): this Mac's record as it stands in the
+                // ledger, and each other device's, by section: its group's
+                // name (null: in none) and its pages' addresses.
+                func sections(_ tabs: DeviceTabs) -> [[String: Any]] {
+                    tabs.sections.map { ["group": $0.group?.name ?? NSNull(), "colour": $0.group?.colour ?? NSNull(),
+                                         "pages": $0.pages.map(\.url)] }
+                }
+                if let sync = Bench.pair?.sync {
+                    out["mine"] = sync.ledger.values[sync.ledger.deviceKey]
+                        .flatMap { ICloudMerge.decode(DeviceTabs.self, $0) }.map(sections) ?? []
+                    out["others"] = sync.devices.map { ["name": ICloudSync.title($0.tabs), "sections": sections($0.tabs)] }
+                }
                 for (key, value) in extra { out[key] = value }
                 return out
             }
@@ -4547,8 +4577,10 @@ final class Bench {
                     return
                 }
                 let size = top.bounds.size
-                // The column's side: the window's first 420 points across.
-                let w = Int(min(size.width, 420) * scale), h = Int(size.height * scale)
+                // The column's side: the window's first 420 points across,
+                // or with "wide" all of it.
+                let across = request["wide"] as? Bool == true ? size.width : min(size.width, 420)
+                let w = Int(across * scale), h = Int(size.height * scale)
                 let shot: [String: Any] = ["t": Int((CACurrentMediaTime() - started) * 1000), "space": browser.space.name]
                 if let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                        space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
@@ -4560,6 +4592,9 @@ final class Bench {
                 shots.append(shot)
                 if index == 0 {
                     switch request["action"] as? String {
+                    case "fold": browser.toggleFold()
+                    case "peek": browser.peek(true)
+                    case "unpeek": browser.peek(false)
                     case "space":
                         // Slid in through the map, as on screen.
                         SpaceSwipe.glidesHidden = true
@@ -5390,6 +5425,8 @@ final class Bench {
                     "spaces": browser.spaces.map(\.name),
                     "badge": profiles.several,
                     "erasing": Store.settings.stringArray(forKey: "spaces.erasing") ?? [],
+                    // The space names the dot has shown after a switch, in order.
+                    "namesShown": SpaceDot.namesShown,
                 ])
             }
 
