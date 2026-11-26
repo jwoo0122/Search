@@ -9,6 +9,8 @@ struct PopupGesture {
     private var recorded = false
     private var time: TimeInterval = 0
     private var consumed = false
+    /// Whether this interaction already handed a link to another app.
+    private var handed = false
     private var input = false
     private var menu = false
     /// The interaction was the middle button: a window the page opens for
@@ -36,6 +38,7 @@ struct PopupGesture {
         recorded = true
         time = now
         consumed = false
+        handed = false
         input = kind != "click"
         menu = kind == "menu"
         middle = pressedMiddle
@@ -65,6 +68,19 @@ struct PopupGesture {
     /// PointerLock) but opens nothing.
     func recent(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
         recorded && now >= time && now - time <= 5
+    }
+
+    /// A link for another app (ms-excel:, zoommtg:…) asked for by a frame of
+    /// another site, right after a real click or key in that very frame:
+    /// Excel and Word for the web, in their officeapps.live.com frame on a
+    /// SharePoint page, hand "Open in Desktop App" over this way, from a
+    /// script a moment after the click (idea 1215). Once per interaction,
+    /// and apart from the one window it grants (take()).
+    mutating func takeHandOff(origin: String?, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        guard recorded, origin != nil, self.origin == origin,
+              !handed, now >= time, now - time <= 5 else { return false }
+        handed = true
+        return true
     }
 
     mutating func clear() {
@@ -98,6 +114,24 @@ struct PopupGesture {
         menu = false
         guard recorded, !consumed, now >= time else { return }
         time = now
+    }
+
+    /// Whether a main-frame navigation leaves the page's document, which
+    /// takes the interaction with it. A jump to a #fragment of the same
+    /// address stays in the document, as in Safari and Chrome: a page that
+    /// sets location.hash on a click and then opens its sign-in window had
+    /// the window refused (idea 1200, Teams' "sign in again" banner did
+    /// nothing). A reload or a POST to the same address is a new document.
+    nonisolated static func leavesDocument(to url: URL?, from current: URL?, reload: Bool, method: String?) -> Bool {
+        guard !reload, (method ?? "GET").uppercased() == "GET",
+              let url, let current, url.fragment != nil else { return true }
+        func bare(_ u: URL) -> String? {
+            var parts = URLComponents(url: u, resolvingAgainstBaseURL: false)
+            parts?.fragment = nil
+            return parts?.string
+        }
+        guard let to = bare(url), let from = bare(current) else { return true }
+        return to != from
     }
 
     static func origin(_ info: WKFrameInfo) -> String? {

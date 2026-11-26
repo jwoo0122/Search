@@ -55,6 +55,7 @@ struct SearchApp: App {
     }
 
     var body: some Scene {
+        let _ = Bench.count("app")
         // Where you left it, at the size you left it. SwiftUI saves a
         // window's frame under its id and puts it back before the window
         // first shows; set by hand once the window was up, it showed at the
@@ -70,6 +71,15 @@ struct SearchApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 780)
+        // No event from outside is SwiftUI's to route to this window: a
+        // page handed off from an iPhone, or a file opened from the Finder,
+        // had SwiftUI close the window before opening it again for the
+        // event (AppWindowsController.activateWindowForExternalEvent). The
+        // close counted as yours: with other windows open, its tabs all
+        // went; alone, it left full screen (ideas 1247, 1173). Links takes
+        // them all itself (application(_:continue:), (_:open:), the URL
+        // Apple Event). `python3 Tests/handoff_scene.py`
+        .handlesExternalEvents(matching: [])
         .commands {
             CommandGroup(replacing: .newItem) {
                 // Another window, with tabs of its own (see Windows.swift).
@@ -108,6 +118,10 @@ struct SearchApp: App {
                 // other way in opens too.
                 Button("Bring Things Over…") { browser.bringingIn = "" }
                     .shortcut("file.import")
+                // Every space, its pins and its tabs, to a file any browser
+                // imports, or Search's own (SpacesExport.swift).
+                Button("Export Spaces…") { browser.exportSpaces() }
+                    .shortcut("file.exportSpaces")
                 Divider()
                 Button("Close Tab") { browser.closeFront() }
                     .shortcut("file.closeTab")
@@ -290,6 +304,9 @@ struct SearchApp: App {
                     .shortcut(taken["console"] == nil ? "view.console" : nil)
                 Button("Inspect Element") { browser.inspectWebElement() }
                     .shortcut(taken["pick"] == nil ? "view.inspect" : nil)
+                Button("Developer Mode") { browser.toggleDeveloperMode() }
+                    .shortcut("view.developerMode")
+                    .disabled(DevMode.host(of: browser.active?.pageAddress) == nil)
                 // Only with a developer tools package installed (Settings ›
                 // About › Developer, see DevToolsPackages.swift).
                 if let package = DevToolsPackages.shared.primary, DevToolsPackages.shared.usable(package.offer.id) {
@@ -770,6 +787,8 @@ struct ContentView: View {
                 .overlay {
                     if browser.prefs.showsLinks { LinkBubble(status: browser.linkStatus) }
                 }
+                // Developer Mode's bar, for a site in it (DevMode.swift).
+                .overlay(alignment: .bottomTrailing) { DevBar(browser: browser, tab: tab) }
                 .overlay(alignment: .topTrailing) {
                     if browser.finding {
                         FindBar(browser: browser)
@@ -802,6 +821,7 @@ struct ContentView: View {
         } else if browser.prefs.homeTheme != .off {
             HomeBackground(theme: browser.prefs.homeTheme, tuning: browser.prefs.homeTuning,
                            image: browser.prefs.homeThemeImage, shuffle: browser.prefs.homeShuffle)
+                .clipShape(RoundedRectangle(cornerRadius: cardCorner, style: .continuous))
         } else {
             Palette.ground
         }
@@ -991,7 +1011,7 @@ struct ContentView: View {
             }
             StoreOffer(browser: browser)
             if browser.veiling {
-                hint("Click anything to hide it   ↑↓ wider, narrower   ⌘Z undo   esc done")
+                hint("Click anything to hide it   ⌥-click all like it   ↑↓ wider, narrower   ⌘Z undo   esc done")
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -1119,6 +1139,7 @@ struct ContentView: View {
     }
 
     var body: some View {
+        let _ = Bench.count("content")
         window_
             // The column folded away, and out again at the edge (see Fold.swift).
             .overlay(alignment: sideOnRight ? .trailing : .leading) {
@@ -1467,6 +1488,12 @@ struct ContentView: View {
             window.isExcludedFromWindowsMenu = false
         }
         window.tabbingMode = .disallowed
+        // No picture of the window for macOS's state restoration: Search
+        // brings its windows back itself, from its own files. AppKit drew
+        // one a while after launch and after each change, a buffer the
+        // window's size in pixels (16 MB for a 1280-point window, 60 for a
+        // 5K screen) that the allocator then kept as part of the app.
+        window.disableSnapshotRestoration()
         // Light or dark is the app's to say (Settings › Appearance); the
         // window only has to be the ground colour that goes with it.
         window.titlebarAppearsTransparent = true

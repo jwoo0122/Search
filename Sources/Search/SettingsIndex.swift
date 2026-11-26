@@ -129,6 +129,10 @@ enum SettingsIndex {
               title: "Bring things over", detail: "Bookmarks, history, passwords and extensions from another browser",
               more: "From another browser on this Mac, or from a file it exported. Nothing leaves your Mac.",
               words: ["import", "chrome", "safari", "arc", "migrate"]),
+        .init(id: "general.exportSpaces", group: "browser", icon: "square.and.arrow.up.on.square",
+              title: "Export spaces", detail: "Every space, its pins, folders and open tabs, to a file",
+              more: "A bookmarks file any browser imports, a folder per space with its pins and folders and its open tabs in a folder of their own; or Search's own spaces file, which keeps colours and icons and comes back in through Bring Things Over › File…. Also in File › Export Spaces….",
+              words: ["export", "backup", "spaces", "pins", "bookmarks", "html", "save", "leave", "moving"], parent: "general.import"),
         .init(id: "icloud", group: "devices", icon: "icloud",
               title: "Sync with iCloud", detail: "With your iPhone and other Macs: open tabs, pins, spaces, bookmarks, a few settings",
               more: "Through your own iCloud, end to end encrypted: Search on your iPhone and your other Macs see this Mac's open tabs (under History and in the address field, as Tabs on Your Other Devices) and share its pins, spaces, bookmarks, search engine and look. Private tabs never go, nor your history, passwords, cookies or sign-ins. On for a new Search once you leave the welcome, where its switch is, so it can be turned off first; off for a Search you had before until you turn it on. Nothing leaves this Mac while it's off. The way to sync with your iPhone. Off while Sync Macs through a folder is on: use one or the other.",
@@ -155,6 +159,11 @@ enum SettingsIndex {
         .init(id: "downloads.button", group: "downloads", icon: "arrow.down.to.line",
               title: "Always show the downloads button", detail: "Off, it shows only while a file comes in",
               keys: ["downloads.button"]),
+        .init(id: "downloads.screenshots", group: "downloads", icon: "camera.viewfinder",
+              title: "Show screenshots in Downloads", detail: "Screenshots you take with ⇧⌘3, ⇧⌘4 or ⇧⌘5 appear in the list, ready to drag onto a page",
+              more: "Search watches the folder your Mac saves screenshots to (the Desktop, unless you chose another in ⇧⌘5 › Options) and lists each new one as it lands. Nothing already there is listed, the files stay where they are, and nothing leaves your Mac. macOS may ask once whether Search can see that folder.",
+              keys: [Screenshots.key],
+              words: ["screenshot", "screen shot", "capture", "library", "arc", "desktop", "drag", "upload", "image"]),
         .init(id: "downloads.open", group: "downloads", icon: "tray.and.arrow.down",
               title: "Open Downloads", detail: "From its button, ⇧⌘J and History › Downloads",
               more: "In a tab, as the side panel's card floating by the downloads button, or in the side panel beside the page.",
@@ -396,6 +405,11 @@ enum SettingsIndex {
               keys: ["tabs.clickKeepsName"],
               words: ["click", "tab name", "title", "keep name", "address bar", "edit address", "url", "sidebar", "rename", "arc"],
               parent: "address.shown"),
+        .init(id: "tabs.clickRenames", group: "tabbar", icon: "pencil",
+              title: "Double click to rename", detail: "A click on the tab you're on opens its name to type over, not its address",
+              more: "A click on the tab you're on opens its name to type over, as Rename in its right-click menu does, instead of its address. Edit its address with ⌘L.",
+              keys: ["tabs.clickRenames"],
+              words: ["rename", "name", "title", "double click", "click", "tab name"]),
         .init(id: "tabs.mirror", group: "tabwindows", icon: "rectangle.on.rectangle",
               title: "Same tabs in every window", detail: "Each window lists the same open tabs in a space, as it lists the same pins",
               more: "A tab opened, closed, moved, grouped or renamed in one window is so in the others. Each window shows the page on its own, so the same tab can be open in two windows at once. Private tabs stay in their window, and closing a window leaves its tabs in the others.",
@@ -414,6 +428,10 @@ enum SettingsIndex {
               title: "Suggestions from your search engine", detail: "What you type is sent to your engine as you type",
               more: "Its suggestions show under the address field. A custom engine can be given one under Search with. Never from a private tab, and never an address.",
               keys: ["search.suggest"], words: ["autocomplete", "suggest"]),
+        .init(id: "field.top", group: "search", icon: "return",
+              title: "Return takes the top suggestion", detail: "Return goes to the place on top of the list, not a search for what you typed",
+              more: "As in Arc's command bar: the first place under the field is picked as you type, so no arrow key is needed. ↑ lets go of it, and Return searches what you typed. An address typed out still goes where it says.",
+              keys: ["field.top"], words: ["arc", "enter", "return", "first suggestion", "top hit", "autocomplete", "arrow keys", "command bar"]),
         .init(id: "search.keywords", group: "search", icon: "character.cursor.ibeam",
               title: "Site shortcuts", detail: "A word before your search sends it to that site: \"yt cats\"",
               keys: ["search.keywords"], words: ["keyword", "bang"]),
@@ -463,8 +481,12 @@ enum SettingsIndex {
               keys: ["pageZoom"], words: ["zoom", "size", "scale"]),
         .init(id: "pages.capture", group: "pages", icon: "camera.viewfinder",
               title: "Capture pages", detail: "Capture… in the View menu copies an area, an element or the whole page",
-              more: "Drag across an area, click an element, or choose Whole Page; Esc cancels. The picture is copied and saved as a PNG in your downloads folder, and goes nowhere else.",
+              more: "Drag across an area, click an element, or choose Whole Page; Esc cancels. The picture is copied and saved as a PNG in your downloads folder (unless Copy captures only is on), and goes nowhere else.",
               keys: ["pages.capture"], words: ["screenshot", "capture", "snapshot", "picture", "png", "arc"]),
+        .init(id: "pages.capture.copyOnly", group: "pages", icon: "doc.on.clipboard",
+              title: "Copy captures only", detail: "The picture goes on the clipboard, with no PNG saved in your downloads folder",
+              keys: ["pages.capture.copyOnly"], words: ["screenshot", "capture", "clipboard", "copy", "png", "downloads", "save"],
+              parent: "pages.capture"),
         .init(id: "sites.styles", group: "pages", icon: "paintbrush",
               title: "Your own style for a site", detail: "Edit Site Style… in the View menu puts CSS of yours on the site you're on",
               more: "Applied as you type, to every page of that site, as Arc's Boosts. CSS only: Search never runs script you write in a page. Off, every style is kept but none is worn.",
@@ -500,8 +522,8 @@ enum SettingsIndex {
               parent: "spaces"),
         .init(id: "profiles", group: "spaces", icon: "person.2",
               title: "Profiles", detail: "Spaces with their own sign-ins, history and bookmarks",
-              more: "In windows of their own, unless Profiles in one window is on. Extensions, passwords and settings are shared.",
-              words: ["profile", "accounts", "work", "personal"]),
+              more: "In windows of their own, unless Profiles in one window is on. Extensions, passwords and settings are shared. The arrows beside each profile change their order, which the numbered shortcuts follow.",
+              words: ["profile", "accounts", "work", "personal", "reorder", "order", "shortcuts"]),
         .init(id: "profiles.oneWindow", group: "spaces", icon: "macwindow",
               title: "Profiles in one window", detail: "Every profile's spaces in one window, switched in place",
               more: "Choosing a space of another profile brings that profile's window into this one's place, so each keeps its own sign-ins. Closing it closes them all.",
@@ -527,6 +549,11 @@ enum SettingsIndex {
               title: "Pinned rows", detail: "Pins as rows under the squares, and Clear over the rest",
               more: "As in Arc: squares for the sites you live in, rows for pages you keep, and a line over the rest with Clear. Right-click a tab to pin it as a row. A row taken away from its page goes back with a click on its icon.",
               keys: ["pins.list"], words: ["arc", "pinned", "back to pinned page", "reset pin", "favicon", "go home"], parent: "tabs.layout"),
+        .init(id: "pins.preview", group: "pins", icon: "rectangle.on.rectangle",
+              title: "Preview pins on hover", detail: "Rest the pointer on a pin for a picture of its page and its unread count",
+              more: "After a moment, a small card beside the pin shows its page as it is, or as it was left if it's asleep, with its title and, for Gmail and other webmail, how many messages are unread. Nothing is loaded or woken to show it, and a private tab's page is never pictured.",
+              keys: ["pins.preview"],
+              words: ["preview", "hover", "hover card", "glance", "peek", "thumbnail", "pinned", "gmail", "unread", "calendar", "arc"]),
         .init(id: "pins.folders", group: "pins", icon: "folder",
               title: "Folders in pinned rows", detail: "Pinned rows in folders, folders in folders, as in Arc",
               more: "Right-click a pinned row and choose New Folder, or drag a row onto a folder. A folder folds with a click and holds up to three levels. Bringing Arc over keeps its folders as folders here. New Live Folder… fills one from a site's RSS or Atom feed, kept fresh every half hour.",
@@ -711,6 +738,12 @@ enum SettingsIndex {
                       "device toolbar", "responsive", "emulation", "sensors", "geolocation", "mobile",
                       "chrome devtools", "elements", "styles", "console", "network", "sources", "debugger", "breakpoints",
                       "application", "storage", "cookies", "memory", "heap snapshot", "coverage", "css overview", "issues"]),
+        .init(id: "developer.local", group: "developer", icon: "chevron.left.forwardslash.chevron.right",
+              title: "Developer Mode for local sites", detail: "localhost, 127.0.0.1 and .test pages show their whole address and a bar of tools",
+              more: "The bar floats over the page's corner: the whole address, Web Inspector, Reload Ignoring Cache, and the cache turned off for the site's reloads. Any site can be put in Developer Mode or taken out of it from its site card or with ⇧⌥⌘I, and is remembered. Off, only the sites you turn on show it.",
+              keys: [DevMode.localKey, DevMode.sitesKey],
+              words: ["developer mode", "dev mode", "localhost", "local", "127.0.0.1", "dev server", "full url", "full address",
+                      "cache", "disable cache", "hard reload", "inspector", "devtools", "web developer"]),
         .init(id: "bench", group: "developer", icon: "terminal",
               title: "Let a script drive Search", detail: "A local socket for testing; its tabs never take over",
               more: "Its tabs open beside yours with a flask on them. See ./bench.",
@@ -821,9 +854,10 @@ enum SettingsIndex {
         case "sidebar.hides", "sidebar.slides", "layout.cards", "pins.list": return prefs.sidebar
         case "layout.cardsFullScreen": return prefs.sidebar && prefs.cards
         case "address.width": return prefs.addressLine && !prefs.sidebar
-        case "tabs.clickKeepsName": return prefs.addressLine && !prefs.iconColumn
-        // A click that edits nothing has no card to leave out.
-        case "tabs.clickAddressOnly": return !(prefs.tabClickKeepsName && prefs.addressLine && !prefs.iconColumn)
+        case "tabs.clickKeepsName": return prefs.addressLine && !prefs.iconColumn && !prefs.tabClickRenames
+        // A click that edits nothing, or edits the name, has no card to leave out.
+        case "tabs.clickAddressOnly": return prefs.iconColumn || !(prefs.tabClickRenames || prefs.tabClickKeepsName && prefs.addressLine)
+        case "tabs.clickRenames": return !prefs.iconColumn
         case "tabs.liquid": return LiquidTab.available && !(prefs.sidebar && prefs.sideIcons)
         case "window.glass.style": return prefs.glass && GlassStyle.liquidAvailable
         // With spaces on they are in the space's Colour…, beside its colour.
@@ -841,6 +875,7 @@ enum SettingsIndex {
         case "mail.default": return prefs.webmail != .none
         case "links.peek.stays": return prefs.peeksLinks || prefs.pinsPeek
         case "launcher.key": return prefs.launcher
+        case "pages.capture.copyOnly": return prefs.capturesPages
         case "icloud.erase": return ICloudSync.shared.on
         default: return true
         }
@@ -858,8 +893,9 @@ enum SettingsIndex {
         case "window.glass.clear", "window.glass.grain": return "With spaces on, in the space's menu › Colour…"
         case "sidebar.foldIcons": return "Only with the column down a side and not hidden until the edge"
         case "icloud.erase": return "Only while Sync with iCloud is on"
-        case "tabs.clickKeepsName": return "Only with the address bar always shown, and titles in the column or tabs across the top"
-        case "tabs.clickAddressOnly": return "Has no effect while Clicking the tab you're on keeps its name is on"
+        case "tabs.clickKeepsName": return "Only with the address bar always shown, titles in the column or tabs across the top, and Double click to rename off"
+        case "tabs.clickAddressOnly": return "Has no effect while Double click to rename or Clicking the tab you're on keeps its name is on"
+        case "tabs.clickRenames": return "Only with titles in the column or tabs across the top"
         case "profiles.oneWindow": return "Only with more than one profile"
         case "spaces.links", "links.ask", "spaces.buttons": return "Only with Spaces on"
         case "sidebar.player": return "Only with titles in the sidebar"
@@ -1082,6 +1118,7 @@ extension SettingsIndex {
     /// defaults changed: what Tests/settings_layout.py reads back.
     @MainActor static func values(_ prefs: Preferences) -> [String: Any] {
         [
+            "glyph": prefs.glyph.rawValue,
             "tabs.layout": prefs.tabsLayout.rawValue,
             "tabs.sleep": prefs.sleepChoice.rawValue,
             "float.own": prefs.floatOwn.rawValue,
