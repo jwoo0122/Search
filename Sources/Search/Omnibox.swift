@@ -410,12 +410,22 @@ private struct UnlessThemed<Content: View>: View {
         if over || !themed { content() }
     }
 
-    /// A chosen picture that can't be read shows as Off (HomeBackground).
-    private var themed: Bool {
-        switch prefs.homeTheme {
-        case .off: return false
-        case .custom: return HomeBackground.load(prefs.homeThemeImage) != nil
-        default: return true
+    private var themed: Bool { HomeBackground.behind(prefs) }
+}
+
+/// Under a new tab's site chips and tiles when a theme is behind them
+/// (Settings › Themes): the window's own ground, mostly opaque, with its
+/// hairline, so their ink reads on any picture. On their own they were all
+/// but gone wherever the picture was as light, or as dark, as the ink:
+/// a light picture with the Mac in dark mode (idea 881).
+struct WallBacking<S: InsettableShape>: View {
+    let shape: S
+    @ObservedObject private var prefs = Shared.prefs
+
+    var body: some View {
+        if HomeBackground.behind(prefs) {
+            shape.fill(Palette.ground.opacity(0.82))
+                .overlay(shape.strokeBorder(Palette.hairline))
         }
     }
 }
@@ -865,6 +875,12 @@ struct AddressField: NSViewRepresentable {
             case #selector(NSResponder.moveUp(_:)):
                 browser.walk(-1)
                 return true
+            case #selector(NSResponder.insertTab(_:)) where textView.string.isEmpty && HomeTiles.showing(browser)
+                && HomeTiles.count(browser) > 0:
+                // Tab from a new tab's empty field: to its first site tile
+                // (HomeTiles.swift), the way down to them by keys.
+                NotificationCenter.default.post(name: HomeTiles.focusFirst, object: browser)
+                return true
             case #selector(NSResponder.deleteWordBackward(_:)):
                 // ⌥⌫ over an offered ending lets go of it and takes the last
                 // word typed, as it does with no ending there. Left to the
@@ -906,6 +922,24 @@ class RoomyField: NSTextField {
     override class var cellClass: AnyClass? {
         get { RoomyFieldCell.self }
         set {}
+    }
+
+    /// Two fingers over a long address being edited move along it: sideways,
+    /// or up and down, as a mouse's wheel can. AppKit's field doesn't scroll
+    /// for them, only for the caret, and passed them on: in the column the
+    /// stroke went on to the next space, and the middle of a long address
+    /// could only be reached with ← and →, a letter at a time. A field not
+    /// being edited, or whose text fits, passes them on as before.
+    override func scrollWheel(with event: NSEvent) {
+        guard let editor = currentEditor() as? NSTextView, let clip = editor.superview as? NSClipView,
+              editor.frame.width > clip.bounds.width else { return super.scrollWheel(with: event) }
+        let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY
+        let delta = abs(dx) >= abs(dy) ? dx : dy
+        // A notch of the wheel says lines, not points.
+        let step = event.hasPreciseScrollingDeltas ? delta : delta * (font?.pointSize ?? 13)
+        var bounds = clip.bounds
+        bounds.origin.x -= step
+        clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
     }
 }
 
