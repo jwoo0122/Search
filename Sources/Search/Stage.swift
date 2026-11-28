@@ -18,8 +18,7 @@ private struct BlankWall: View {
 
     var body: some View {
         if prefs.homeTheme != .off {
-            HomeBackground(theme: prefs.homeTheme, tuning: prefs.homeTuning, image: prefs.homeThemeImage,
-                           shuffle: prefs.homeShuffle)
+            HomeBackground(theme: prefs.homeTheme, tuning: prefs.homeTuning, image: prefs.homeThemeImage)
         }
     }
 }
@@ -31,6 +30,9 @@ struct Page: View {
     var holdsPage = true
     /// The page's corners, as a card on the window's frame (see CardEdge).
     var corner: CGFloat = 0
+    /// Its top two square, under the row above the page inside the card
+    /// (Toolbar).
+    var squareTop = false
     /// The window, for a tab showing one of Search's own pages, which are
     /// drawn here in the web page's place (see InternalPages.swift).
     var browser: Browser?
@@ -44,7 +46,7 @@ struct Page: View {
             // the card's clip doesn't reach under the page's AppKit view.
             if tab.isBlank {
                 BlankWall()
-                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                    .clipShape(Metrics.cardOutline(corner, squareTop: squareTop))
             }
             // A tab put down with ⌘W has no view, and asking for one here
             // would build an empty one a frame before the stage moves on.
@@ -58,7 +60,7 @@ struct Page: View {
             }
 
             if let page = tab.page, let browser {
-                InternalPageView(browser: browser, tab: tab, page: page, corner: corner)
+                InternalPageView(browser: browser, tab: tab, page: page, corner: corner, squareTop: squareTop)
             }
 
             if let cover = tab.cover {
@@ -314,6 +316,20 @@ final class StageView: NSView {
     /// draws white: the stage was a white screen, the video gone from it.
     private weak var leftFullScreen: WKWebView?
 
+    /// A page WebKit has brought home from full screen while another tab is
+    /// on show (Preferences.keepsWindow, or ⌃Tab from the video). It lands
+    /// here under its placeholder, which WebKit takes away only once the
+    /// page has painted again. Taken out of the window at once, it never
+    /// painted, the placeholder stayed for good, and every blank tab showed
+    /// that picture under its wall until Search was quit. So it is kept,
+    /// unseen, until the placeholder goes, or for a moment at most.
+    private weak var landing: WKWebView?
+    /// The page lent to full screen from here while another tab was shown:
+    /// the only one WebKit brings home behind it.
+    private weak var awayFromHere: WKWebView?
+    private var landingSince: Date?
+    private static let landingLimit: TimeInterval = 2
+
     /// How a page is asked to end its full screen: as its own button does.
     /// Its own property for the tests, which can't go full screen.
     var endFullScreen: (WKWebView) -> Void = { web in
@@ -401,6 +417,9 @@ final class StageView: NSView {
     /// How much smaller than this view the card is, across and down.
     private var cardShort = CGSize.zero
     private var cardCorner: CGFloat = 0
+    /// The row above the page inside the card (Toolbar): only the bottom
+    /// corners round.
+    private var cardSquareTop = false
     /// Made once and kept: no layer is made while the card moves.
     private lazy var cardMask: CALayer = {
         let mask = CALayer()
@@ -409,11 +428,12 @@ final class StageView: NSView {
         return mask
     }()
 
-    func clip(card: (() -> CGSize)?, corner: CGFloat) {
+    func clip(card: (() -> CGSize)?, corner: CGFloat, squareTop: Bool = false) {
         cardDriven = true
         cardSize = card
         cardShort = .zero
         cardCorner = corner
+        cardSquareTop = squareTop
         // Cut once this view is laid out in this same pass, where it is
         // put for this frame: cut before, under Reduce Motion, the page was
         // cut to its new card a frame before it moved there.
@@ -421,11 +441,12 @@ final class StageView: NSView {
     }
 
     /// Cut by a stage of two pages, which works out each page's share.
-    func clip(short: CGSize, corner: CGFloat) {
+    func clip(short: CGSize, corner: CGFloat, squareTop: Bool = false) {
         cardDriven = true
         cardSize = nil
         cardShort = short
         cardCorner = corner
+        cardSquareTop = squareTop
         applyCard()
     }
 
@@ -436,18 +457,26 @@ final class StageView: NSView {
         }
         wantsLayer = true
         guard let layer else { return }
+        // The page's bottom is the layer's minimum y unless the view is
+        // flipped, and so are its bottom corners.
+        let bottom: CACornerMask = isFlipped ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+                                             : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        let corners: CACornerMask = cardSquareTop ? bottom : [.layerMinXMinYCorner, .layerMaxXMinYCorner,
+                                                               .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if cardShort.width < 0.25, cardShort.height < 0.25 {
             if layer.mask != nil { layer.mask = nil }
             layer.cornerRadius = cardCorner
             layer.cornerCurve = .continuous
+            layer.maskedCorners = corners
             layer.masksToBounds = cardCorner > 0
         } else {
             layer.cornerRadius = 0
             layer.masksToBounds = false
             let size = CGSize(width: max(0, bounds.width - cardShort.width), height: max(0, bounds.height - cardShort.height))
             cardMask.cornerRadius = cardCorner
+            cardMask.maskedCorners = corners
             cardMask.frame = CGRect(x: 0, y: isFlipped ? 0 : bounds.height - size.height, width: size.width, height: size.height)
             if layer.mask !== cardMask { layer.mask = cardMask }
         }
@@ -480,6 +509,11 @@ final class StageView: NSView {
             parting = nil
             page.alphaValue = 1
         }
+        if let page, page === landing || page === awayFromHere {
+            landing = nil
+            landingSince = nil
+            awayFromHere = nil
+        }
         if let leaving = wanted, leaving !== page, let dock = subviews.first(where: Self.isInspector) {
             Self.docks.setObject(dock, forKey: leaving)
             dock.removeFromSuperview()
@@ -488,6 +522,7 @@ final class StageView: NSView {
         if chosen, let leaving = wanted as? WKWebView, leaving.fullscreenState != .notInFullscreen,
            subviews.contains(where: Self.isPlaceholder) {
             leftFullScreen = leaving
+            awayFromHere = leaving
         }
         if leftFullScreen?.fullscreenState == .notInFullscreen { leftFullScreen = nil }
         wanted = page
@@ -582,7 +617,19 @@ final class StageView: NSView {
     /// resize, it left the page shrunk beside nothing (#91).
     private func clearUnwanted() {
         let docked = inspecting
+        // A placeholder is only ever kept for a page still on its way into,
+        // in or out of full screen: where WebKit brings it home. With none
+        // such, nor a page just home that WebKit is still painting, it is a
+        // picture left behind, whatever path left it, and it goes.
+        let overdue = landingOverdue
+        let homeHere = awayFromHere.map { $0.superview === self } ?? false
+        let stale = !anyPageAway() && (!homeHere || overdue)
+        var landed = false
         for view in subviews where view !== wanted && !(docked && Self.isInspector(view)) {
+            if Self.isPlaceholder(view), stale {
+                view.removeFromSuperview()
+                continue
+            }
             // Another tab in front while this page fills the screen: WebKit
             // brings the page home to its placeholder, so that stays, under
             // the tab in front, and so does the page on its way back. Taken
@@ -603,7 +650,20 @@ final class StageView: NSView {
                 hold(view)
                 continue
             }
+            // Home from full screen behind the tab on show, its placeholder
+            // still here: left in the window, unseen, to paint (see landing).
+            if let page = view as? WKWebView, page === awayFromHere, subviews.contains(where: Self.isPlaceholder), !overdue {
+                land(page)
+                continue
+            }
+            if view === landing { landed = true; landing = nil; landingSince = nil }
+            if view === awayFromHere { awayFromHere = nil }
             view.removeFromSuperview()
+        }
+        // WebKit gave the keys back to the page that came home; gone again,
+        // they go to the page on show.
+        if landed, let window, let wanted, wanted.superview === self, window.firstResponder === window {
+            window.makeFirstResponder(wanted)
         }
         // Calls that ended, or pages that went elsewhere, are watched no more.
         for (key, watch) in calls {
@@ -678,11 +738,54 @@ final class StageView: NSView {
         calls[key] = CallWatch(web) { [weak self] in self?.settle() }
     }
 
+    /// A page come home from full screen, kept: unseen, and never the one
+    /// the keys or a click go to. Looked at again once its time is up.
+    private func land(_ page: WKWebView) {
+        page.alphaValue = 0
+        if let window, let responder = window.firstResponder as? NSView,
+           responder === page || responder.isDescendant(of: page) {
+            if let wanted, wanted.superview === self { window.makeFirstResponder(wanted) } else { window.makeFirstResponder(nil) }
+        }
+        guard landing !== page else { return }
+        landing = page
+        landingSince = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.landingLimit + 0.05) { [weak self] in
+            self?.needsLayout = true
+        }
+    }
+
+    /// Whether any tab's page is in, or on its way into or out of, WebKit's
+    /// full screen: the only time a placeholder stands for something. A
+    /// closed tab's page is no tab's: its placeholder stood for nothing, and
+    /// stayed under every blank tab until Search was quit. The tests' too.
+    var anyPageAway: () -> Bool = {
+        Browsers.all.contains { $0.tabs.contains { ($0.built?.fullscreenState ?? .notInFullscreen) != .notInFullscreen } }
+    }
+
+    /// Whether the page come home has waited too long for WebKit.
+    private var landingOverdue: Bool {
+        guard let landingSince else { return false }
+        return Date().timeIntervalSince(landingSince) >= Self.landingLimit
+    }
+
+    /// WebKit's placeholder gone: the page that came home is put away.
+    override func willRemoveSubview(_ subview: NSView) {
+        super.willRemoveSubview(subview)
+        // Not while this stage itself goes: a view being let go of takes its
+        // subviews out, and can't be referred to, even weakly, any more.
+        guard window != nil, Self.isPlaceholder(subview) else { return }
+        DispatchQueue.main.async { [weak self] in self?.needsLayout = true }
+    }
+
     /// Nothing reaches a page kept unseen: a click, a scroll or a drop
     /// there goes to the page on show.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
         if let parting, let hit, hit === parting || hit.isDescendant(of: parting) { return nil }
+        if let landing, landing !== wanted, let hit, hit === landing || hit.isDescendant(of: landing) {
+            guard let wanted, wanted.superview === self else { return nil }
+            return wanted.hitTest(convert(point, from: superview))
+        }
         if let hit, let held = subviews.first(where: { holdsCall($0) && (hit === $0 || hit.isDescendant(of: $0)) }),
            held !== wanted {
             guard let wanted, wanted.superview === self else { return nil }

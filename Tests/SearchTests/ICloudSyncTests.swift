@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import AppKit
+import CloudKit
 @testable import Search
 
 /// Sync with iCloud (ICloudSync.swift), against SYNC.md in Search-iOS: the
@@ -53,7 +55,8 @@ final class ICloudSyncTests: XCTestCase {
         }
         func send() async throws { check("send"); sends += 1 }
         func eraseZone() async throws { check("eraseZone"); erased = true }
-        func account() async -> ICloudSync.Account { check("account"); return state }
+        var accountAsks = 0
+        func account() async -> ICloudSync.Account { check("account"); accountAsks += 1; return state }
         func close() {}
     }
 
@@ -607,6 +610,26 @@ final class ICloudSyncTests: XCTestCase {
         XCTAssertEqual(engine.saved, [])
     }
 
+    /// Idea 1306: every Personal space writes its own pins record, the
+    /// first space deleted (#1326) or never there (an import's spaces) too,
+    /// and a later change to one space's pins goes up on the next publish.
+    func testEverySpaceWritesItsPinsEvenWithoutTheFirstSpace() async {
+        let mac = FakeMac(), engine = FakeEngine()
+        let home = Space(id: UUID(), name: "Zen home", colour: 1), work = Space(id: UUID(), name: "Work", colour: 2)
+        mac.spaceList = [home, work]
+        mac.pinList = [home.id: [pin("m", "https://mail.example/")], work.id: [pin("g", "https://git.example/")]]
+        let sync = await joined(mac, engine)
+        XCTAssertTrue(engine.saved.contains("pins.\(home.id.uuidString)"))
+        XCTAssertTrue(engine.saved.contains("pins.\(work.id.uuidString)"))
+        XCTAssertFalse(engine.saved.contains("pins.\(first.uuidString)"), "no record for a space this Mac doesn't have")
+        let sent = try? JSONDecoder().decode([PinDef].self, from: sync.outgoing("pins.\(home.id.uuidString)")?.data ?? Data())
+        XCTAssertEqual(sent?.map(\.letter), ["m"])
+        engine.saved = []
+        mac.pinList[work.id]?.append(pin("d", "https://docs.example/"))
+        sync.publish()
+        XCTAssertEqual(engine.saved, ["pins.\(work.id.uuidString)"])
+    }
+
     func testAnotherMacDeletingASpaceDeletesItHereButNeverTheFirst() async {
         let mac = FakeMac(), engine = FakeEngine()
         let work = Space(id: UUID(), name: "Work", colour: 1)
@@ -1100,5 +1123,258 @@ final class ICloudSyncTests: XCTestCase {
         defaults.removeObject(forKey: Sync.deviceMacKey)
         XCTAssertEqual(Sync.device(in: defaults, mac: "mac-c"), copied, "an id from before the fingerprint stays")
         XCTAssertEqual(defaults.string(forKey: Sync.deviceMacKey), "mac-c")
+    }
+
+    // MARK: - every account answer says why (idea 1330)
+
+    func testCloudKitStatusesMapToTheirAccount() {
+        XCTAssertEqual(ICloudSync.account(.available, signedInToICloud: true), .signedIn)
+        XCTAssertEqual(ICloudSync.account(.noAccount, signedInToICloud: false), .signedOut)
+        XCTAssertEqual(ICloudSync.account(.noAccount, signedInToICloud: true), .offForSearch)
+        XCTAssertEqual(ICloudSync.account(.restricted, signedInToICloud: false), .restricted)
+        XCTAssertEqual(ICloudSync.account(.temporarilyUnavailable, signedInToICloud: false), .needsAttention)
+        XCTAssertEqual(ICloudSync.account(.couldNotDetermine, signedInToICloud: false), .unreachable)
+        XCTAssertEqual(ICloudSync.account(nil, signedInToICloud: false), .unreachable, "asking failed")
+    }
+
+    func testEveryAccountAnswerSaysWhyUnderTheSwitch() async {
+        let expected: [(ICloudSync.Account, String)] = [
+            (.signedOut, "Sign in to iCloud in System Settings"),
+            (.offForSearch, "Turn on iCloud for Search in System Settings › Apple Account › iCloud"),
+            (.restricted, "iCloud is restricted on this Mac"),
+            (.needsAttention, "Your Apple Account needs attention in System Settings"),
+            (.unreachable, "Couldn't reach iCloud. Trying again."),
+        ]
+        for (state, line) in expected {
+            let engine = FakeEngine()
+            engine.state = state
+            let sync = make(FakeMac(), engine)
+            sync.retryScale = 1000 // no second try during this test
+            sync.turnOn()
+            await sync.join()
+            await until { sync.account == state }
+            XCTAssertFalse(sync.joined, "\(state)")
+            XCTAssertEqual(engine.fetches, 0, "\(state): nothing fetched or written before signing in")
+            XCTAssertEqual(sync.problem, line, "\(state)")
+            XCTAssertEqual(sync.summary(folderSyncOn: false, otherwise: "off"), line, "\(state)")
+            sync.turnOff()
+        }
+    }
+
+    func testCouldNotReachTriesAgainGentlyThenJoins() async {
+        let engine = FakeEngine()
+        engine.state = .unreachable
+        let sync = make(FakeMac(), engine)
+        sync.retryScale = 0.001 // 30 ms, 60 ms, 120 ms…
+        sync.turnOn()
+        await until { sync.retries >= 1 }
+        XCTAssertEqual(sync.problem, "Couldn't reach iCloud. Trying again.")
+        await until { sync.retries >= 3 }
+        XCTAssertEqual(sync.retryDelay, 120, "each wait longer than the last")
+        XCTAssertEqual(ICloudSync.backoff(0), 30)
+        XCTAssertEqual(ICloudSync.backoff(20), 900, "never more than 15 minutes")
+        // Never a tight loop: one ask per wait.
+        XCTAssertLessThanOrEqual(engine.accountAsks, sync.retries + 1)
+        XCTAssertEqual(engine.fetches, 0)
+
+        engine.state = .signedIn
+        await until { sync.joined }
+        XCTAssertTrue(sync.joined, "reached on a later try")
+        XCTAssertNil(sync.problem)
+        XCTAssertEqual(sync.retries, 0)
+        XCTAssertNil(sync.retryDelay)
+        let asks = engine.accountAsks
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(engine.accountAsks, asks, "no more tries once joined")
+        sync.turnOff()
+    }
+
+    func testAccountChangedAndComingBackToTheFrontJoin() async {
+        let engine = FakeEngine()
+        engine.state = .offForSearch
+        let sync = make(FakeMac(), engine)
+        sync.turnOn()
+        await until { sync.account == .offForSearch }
+        XCTAssertFalse(sync.joined)
+
+        // iCloud turned on for Search in System Settings.
+        engine.state = .signedIn
+        NotificationCenter.default.post(name: .CKAccountChanged, object: nil)
+        await until { sync.joined }
+        XCTAssertTrue(sync.joined, "joined on CKAccountChanged")
+        XCTAssertNil(sync.problem)
+        sync.turnOff()
+
+        // The Apple Account needed attention, sorted out while away.
+        let other = FakeEngine()
+        other.state = .needsAttention
+        let again = make(FakeMac(), other)
+        again.turnOn()
+        await until { again.account == .needsAttention }
+        XCTAssertEqual(again.problem, "Your Apple Account needs attention in System Settings")
+        other.state = .signedIn
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        await until { again.joined }
+        XCTAssertTrue(again.joined, "joined when the app came back to the front")
+        again.turnOff()
+    }
+
+    func testBothSyncsOnSaysWhyICloudIsNotRunning() {
+        defaults.set(true, forKey: ICloudSync.onKey)
+        let sync = make(FakeMac(), FakeEngine())
+        // `start` refuses while the folder sync is on: no engine.
+        XCTAssertTrue(sync.on)
+        XCTAssertNil(sync.engine)
+        XCTAssertEqual(sync.summary(folderSyncOn: true, otherwise: "off"),
+                       "Not syncing while Sync Macs through a folder is on. Turn that off")
+        XCTAssertEqual(sync.summary(folderSyncOn: false, otherwise: "off"), "Checking iCloud…")
+    }
+
+    func testTheRowSaysWhichProfileSyncs() {
+        XCTAssertNil(ICloudSync.profileLine(several: false, name: "Personal", elsewhere: false), "one profile: nothing about profiles")
+        XCTAssertEqual(ICloudSync.profileLine(several: true, name: "Personal", elsewhere: false), "Syncs the Personal profile")
+        XCTAssertEqual(ICloudSync.profileLine(several: true, name: "Me", elsewhere: true),
+                       "Syncs the Me profile · Switch to Me to sync")
+    }
+
+    // MARK: - a big import (idea 1423)
+
+    /// What a Zen import into Personal looks like: one folder with its
+    /// subfolders and thousands of pages, each with a long address.
+    private func bigImport(_ count: Int, folders: Int = 40) -> [Bookmark] {
+        let per = count / folders
+        let kids = (0..<folders).map { f in
+            Bookmark.folder("Space \(f)", (0..<per).map { n in
+                Bookmark.site("Some page title number \(f)-\(n) of a long reading list",
+                              URL(string: "https://www.example.com/articles/2026/11/section-\(f)/a-fairly-long-slug-for-page-\(n)?utm_source=zen&ref=\(n)")!)
+            })
+        }
+        return [Bookmark.folder("Zen", kids), Bookmark.site("Office Commun", URL(string: "https://officecommun.com/")!)]
+    }
+
+    func testABigImportIsPastOneRecordAndSplitsIntoPartsThatEachFit() throws {
+        let tree = bigImport(6000)
+        let whole = try XCTUnwrap(ICloudMerge.outgoing(tree, over: nil, shape: .bookmarks))
+        XCTAssertGreaterThan(whole.count, 1_000_000, "6,000 pages with real addresses are past CloudKit's record (the bug)")
+        let parts = ICloudMerge.splitBookmarks(whole)
+        XCTAssertGreaterThan(parts.count, 1)
+        for part in parts { XCTAssertLessThanOrEqual(part.count, ICloudMerge.recordBudget) }
+        // Every part is a list of bookmarks as the iPhone has always read it.
+        for part in parts { XCTAssertNotNil(try? JSONDecoder().decode([PhoneBookmark].self, from: part)) }
+        // And the parts are the list again, order and all.
+        let back = try XCTUnwrap(ICloudMerge.joinBookmarks(parts))
+        XCTAssertEqual(try JSONDecoder().decode([Bookmark].self, from: back), tree)
+        XCTAssertEqual(back, whole)
+    }
+
+    func testAListThatFitsIsTheOneRecordItAlwaysWas() throws {
+        let tree = bigImport(400)
+        let whole = try XCTUnwrap(ICloudMerge.outgoing(tree, over: nil, shape: .bookmarks))
+        XCTAssertLessThan(whole.count, ICloudMerge.recordBudget)
+        XCTAssertEqual(ICloudMerge.splitBookmarks(whole), [whole])
+    }
+
+    func testBookmarksPastOneRecordGoUpInPartsAndAnotherMacReadsThemBack() async throws {
+        let mac = FakeMac(), engine = FakeEngine()
+        mac.marks = bigImport(6000)
+        let sync = await joined(mac, engine)
+        let keys = engine.saved.filter { ICloudMerge.bookmarksPart($0) != nil }
+        XCTAssertTrue(keys.contains("bookmarks") && keys.contains("bookmarks.2"), "\(keys)")
+        var cloud: [(key: String, data: Data, at: Date)] = []
+        for key in keys {
+            let out = try XCTUnwrap(sync.outgoing(key))
+            XCTAssertLessThan(out.data.count, 1_000_000, "\(key) fits a record")
+            cloud.append((key, out.data, out.at))
+        }
+        // The other Mac, new to iCloud.
+        let other = FakeMac(), otherEngine = FakeEngine()
+        otherEngine.cloud = cloud
+        let otherSuite = "icloud-tests-\(UUID().uuidString)"
+        let otherDefaults = try XCTUnwrap(UserDefaults(suiteName: otherSuite))
+        defer { otherDefaults.removePersistentDomain(forName: otherSuite) }
+        let theirs = make(other, otherEngine, defaults: otherDefaults)
+        theirs.turnOn()
+        await theirs.join()
+        XCTAssertTrue(theirs.joined)
+        XCTAssertEqual(other.marks, mac.marks, "all of it, in order")
+        XCTAssertFalse(otherEngine.saved.contains { ICloudMerge.bookmarksPart($0) != nil }, "nothing echoed")
+        // No echo here either.
+        engine.saved = []
+        sync.publish()
+        XCTAssertTrue(engine.saved.filter { ICloudMerge.bookmarksPart($0) != nil }.isEmpty)
+    }
+
+    func testBookmarksThatShrinkDeleteTheirLaterParts() async throws {
+        let mac = FakeMac(), engine = FakeEngine()
+        mac.marks = bigImport(6000)
+        let sync = await joined(mac, engine)
+        XCTAssertNotNil(sync.ledger.values["bookmarks.2"])
+        mac.marks = [Bookmark.site("One", URL(string: "https://one.example/")!)]
+        engine.saved = []
+        sync.publish()
+        XCTAssertEqual(engine.saved.filter { ICloudMerge.bookmarksPart($0) != nil }, ["bookmarks"])
+        XCTAssertTrue(engine.deleted.contains("bookmarks.2"))
+        XCTAssertNil(sync.ledger.values["bookmarks.2"])
+    }
+
+    func testAnIPhoneReadingOnlyTheFirstPartStillReadsTheShapes() throws {
+        let whole = try XCTUnwrap(ICloudMerge.outgoing(bigImport(6000), over: nil, shape: .bookmarks))
+        let first = try XCTUnwrap(ICloudMerge.splitBookmarks(whole).first)
+        let list = try JSONDecoder().decode([PhoneBookmark].self, from: first)
+        XCTAssertEqual(list.first?.title, "Zen")
+        XCTAssertFalse(list.first?.children?.isEmpty ?? true)
+    }
+
+    /// The import itself, through the real code: Zen's bookmarks taken
+    /// into a Personal list post the saved notification, and what that
+    /// leaves goes up as a record.
+    func testAnImportIntoPersonalPostsTheSavedNotificationAndGoesUp() async throws {
+        let store = Bookmarks(file: "idea1423-\(UUID().uuidString).json")
+        defer { store.retire() }
+        let mac = FakeMac(), engine = FakeEngine()
+        let sync = await joined(mac, engine)
+        engine.saved = []
+        var posted = 0
+        let token = NotificationCenter.default.addObserver(forName: Bookmarks.saved, object: store, queue: nil) { _ in
+            MainActor.assumeIsolated { posted += 1; mac.marks = store.roots }
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        let zen = bigImport(6000)[0].children ?? []
+        XCTAssertEqual(store.takeNoting(zen, from: "Zen").added, 6000)
+        XCTAssertEqual(posted, 1, "takeNoting saves, so sync hears of it")
+        sync.publish()
+        XCTAssertTrue(engine.saved.contains("bookmarks"))
+        XCTAssertTrue(engine.saved.contains("bookmarks.2"), "past one record: in parts, not dropped")
+
+        // The file import (bookmarks HTML, Safari export) is another way in.
+        let more = [Bookmark.site("Another", URL(string: "https://another.example/")!)]
+        _ = try await store.takeFile(more, from: "HTML", control: ImportFile.Control())
+        XCTAssertEqual(posted, 2)
+        // Moving one between folders, and taking an import back out.
+        let id = try XCTUnwrap(store.roots.last?.id)
+        store.move(id, into: store.roots.first?.id)
+        XCTAssertEqual(posted, 3)
+        store.withdraw([id])
+        XCTAssertEqual(posted, 4)
+    }
+
+    // MARK: the line when something can't go up
+
+    func testARecordThatCantGoUpSaysWhichAndWhy() {
+        let big = ICloudSync.upload("bookmarks.2", failed: CKError(.limitExceeded))
+        XCTAssertEqual(big, "Couldn\u{2019}t send bookmarks: too big for iCloud to take in one piece")
+        XCTAssertTrue(ICloudSync.upload("pins.\(first.uuidString)", failed: CKError(.permissionFailure))?.hasPrefix("Couldn\u{2019}t send pins") == true)
+        XCTAssertNotNil(ICloudSync.upload("settings", failed: CKError(.internalError)), "nothing is a quiet default")
+        XCTAssertNil(ICloudSync.upload("bookmarks", failed: CKError(.networkFailure)), "the engine tries these again itself")
+        XCTAssertNil(ICloudSync.upload("bookmarks", failed: CKError(.serviceUnavailable)))
+    }
+
+    func testTheLineGoesWhenRecordsGoUpAgain() async {
+        let sync = await joined(FakeMac(), FakeEngine())
+        sync.failed("Couldn\u{2019}t send bookmarks: too big")
+        XCTAssertNotNil(sync.problem)
+        sync.sent()
+        XCTAssertNil(sync.problem)
     }
 }

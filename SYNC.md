@@ -30,7 +30,8 @@ One record type, `Item`. Its record name says what it holds:
 |---|---|---|
 | `device.<device-uuid>` | `DeviceTabs`: this device's open tabs | that device only |
 | `pins.<space-uuid>` | `[PinDef]`: one space's pins, in order | any device |
-| `bookmarks` | `[Bookmark]`: the whole tree | any device |
+| `bookmarks` | `[Bookmark]`: the whole tree, or its first part (see "Big bookmark lists") | any device |
+| `bookmarks.2`, `bookmarks.3`… | `[Bookmark]`: the next parts of a tree too big for one record | any device |
 | `spaces` | `[Space]`: the Mac's spaces | the Mac |
 | `pinfolders.<space-uuid>` | `[{id, name, parent?, feed?}]`: one space's pin folders | the Mac; the iPhone keeps it as-is and doesn't apply it |
 | `settings` | `SharedSettings` | any device |
@@ -59,8 +60,12 @@ SharedSettings{ engine: String?, custom: String?, suggest: String?, look: String
 ```
 
 - Dates are JSONEncoder's default (seconds since 2001, a number).
-- The first space is `00000000-0000-0000-0000-000000000001`; the iPhone shows
-  that space's pins unless another is chosen.
+- The first space is the first one in the `spaces` record; the iPhone shows
+  that space's pins unless another is chosen. It is often
+  `00000000-0000-0000-0000-000000000001`, but not always: since 1.0.17 any
+  space can be deleted on the Mac, the first included, and Personal's home
+  then moves to another space. The Mac writes a `pins.<space>` record for
+  every space in `spaces`, whatever its id.
 - `DeviceTabs.tabs`: ordinary web pages only, no pinned tabs (pins travel as
   pins), **never private tabs**. The Mac sends every window's tabs of every
   space as one list.
@@ -92,6 +97,34 @@ SharedSettings{ engine: String?, custom: String?, suggest: String?, look: String
   https, with `%s` where the words go. Empty or absent, and a custom engine
   has none, as before. It may be on a different host than `custom`.
 
+## Big bookmark lists
+
+A record can't be over about 1 MB (CloudKit), and a big import (a few
+thousand pages from Zen or Arc) is past that: the save fails and nothing
+goes up. So a tree whose JSON is over **700,000 bytes** goes up in parts,
+additively:
+
+- `bookmarks` is always the first part, in the shape it always had: a list
+  of `Bookmark`. The next parts are `bookmarks.2`, `bookmarks.3`…, the same
+  shape. A tree that fits is the one `bookmarks` record, exactly as before.
+- The tree is cut in reading order (depth first), each part filled up to the
+  700,000 bytes (compact JSON, sorted keys, slashes unescaped) before the
+  next starts. A folder that continues in the next part is there again, with
+  the **same `id` and `title`** and the rest of its children; a reader
+  merges folders with the same `id` across parts, in part order.
+- A device reads **every** `bookmarks` / `bookmarks.N` record it has as one
+  tree (parts in numeric order, same-id folders merged) and applies that.
+  A device that only knows `bookmarks` reads the first part: a shorter list,
+  nothing broken.
+- A device writes by cutting its tree the same way, sends only the parts
+  whose JSON differs from the last it wrote or read, and **deletes** the
+  parts above the last one when the tree got shorter. It sends nothing when
+  the tree it has equals the tree the records it holds say, however they
+  were cut (so two devices that cut a little differently never answer each
+  other forever).
+- Per-record rules (latest wins, no echo) are unchanged; unknown fields on a
+  bookmark ride along as before, wherever in the parts it sits.
+
 ## Rules
 
 - **Latest wins, per record.** A change sets `at` to now. A record that
@@ -113,9 +146,9 @@ SharedSettings{ engine: String?, custom: String?, suggest: String?, look: String
   A device that sees the zone gone **turns its sync off** (and says why);
   it doesn't recreate the zone or put its data back. What's on each device
   stays.
-- **Spaces.** A space deleted on the Mac leaves `spaces`; the first space is
-  never deleted. Its `pins.<space>` record may stay in iCloud; it's ignored.
-  An iPhone showing a space that's gone falls back to the first.
+- **Spaces.** A space deleted on the Mac leaves `spaces`, the first one
+  included. Its `pins.<space>` record may stay in iCloud; it's ignored.
+  An iPhone showing a space that's gone falls back to the first in `spaces`.
 - **Mac only, not in this contract:** pins shown in every space (shared
   pins), the folder sync (mutually exclusive with this one), a space's
   downloads folder.

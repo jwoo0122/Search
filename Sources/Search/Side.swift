@@ -46,6 +46,8 @@ struct SideBar: View {
     /// beside the column to follow (see HeldEdges).
     var onDrag: (CGFloat?) -> Void = { _ in }
     @State private var onEdge = false
+    /// Counts the times the edge was let go (see ResizeEdgeCursor.release).
+    @State private var letGo = 0
 
     /// A pin, picked up out of the grid — a separate state from the loose
     /// rows above, since the two gestures never happen at once but move on
@@ -91,7 +93,10 @@ struct SideBar: View {
     private var width: CGFloat { live ?? prefs.columnWidth }
     private static let gap: CGFloat = 2
     private static let groupInset: CGFloat = 4
-    private static let square: CGFloat = 34
+    /// A pinned square at its tallest: the classic 34, or, with Roomier
+    /// tabs, as much taller as the rows are (36 for 28), so its icon grows
+    /// with it (PinSquare draws everything off its shorter edge).
+    static func square(roomy: Bool) -> CGFloat { roomy ? 44 : 34 }
     private static let pinGap: CGFloat = 4
 
     private var onRight: Bool { prefs.sidePosition == .right }
@@ -115,7 +120,9 @@ struct SideBar: View {
     /// What sits above the pins: the lights' band, and with icons only the
     /// three doors under it.
     private var top: CGFloat {
-        !icons ? Metrics.strip : !strip ? lightsBand + Metrics.helmDoors(prefs) + 8 : lightsBand + (stripUp ? stackedDoors : 0)
+        !icons ? Metrics.strip
+            : !strip ? lightsBand + (prefs.toolbar ? 0 : Metrics.helmDoors(prefs) + 8)
+            : lightsBand + (stripUp ? stackedDoors : 0)
     }
     private var innerEdge: Alignment { onRight ? .leading : .trailing }
 
@@ -164,6 +171,9 @@ struct SideBar: View {
     }
     /// The foot's height in a row: its doors and the margin beneath.
     private static let footBox: CGFloat = 26 + 10
+    /// The air above the foot the space's name shows in, after a switch
+    /// (SpaceDot): the pill, and the shadow around it.
+    private static let nameRoom: CGFloat = 44
     /// How far the strip's edge is pulled before the titles come back.
     static let stripPull: CGFloat = 24
 
@@ -250,7 +260,7 @@ struct SideBar: View {
                     Color.clear.frame(height: lightsBand)
                     if stripUp {
                         foot
-                    } else if !strip {
+                    } else if !strip, !prefs.toolbar {
                         Helm(browser: browser, vertical: true)
                             .frame(maxWidth: .infinity)
                             .padding(.bottom, 8)
@@ -262,7 +272,8 @@ struct SideBar: View {
                             FoldDoor(browser: browser, right: prefs.sidePosition == .right)
                                 .padding(.trailing, SideBar.foldDoor(true) - 26)
                         }
-                        Helm(browser: browser)
+                        // Gone up to the row above the page, with the address.
+                        if !prefs.toolbar { Helm(browser: browser) }
                         Spacer(minLength: 0)
                     }
                     .frame(height: Metrics.strip)
@@ -280,8 +291,9 @@ struct SideBar: View {
                                 .accessibilityHidden(!doorsTop)
                         }
                     }
-                    // The page's address, when it is to be in sight.
-                    if prefs.addressLine {
+                    // The page's address, when it is to be in sight here and
+                    // not above the page (Toolbar).
+                    if prefs.addressLine && !prefs.toolbar {
                         AddressLine(browser: browser, height: prefs.sideRow)
                             .padding(.bottom, 6)
                             // Its suggestions hang over the rows below.
@@ -304,7 +316,7 @@ struct SideBar: View {
             .animation(doorsFoot ? SideBar.footIn : SideBar.doorsOut) {
                 $0.modifier(EndInset(bottom: footHeight))
             }
-            .padding(.bottom, (browser.player == nil ? 0 : rowHeight + SideBar.playerGap)
+            .padding(.bottom, CGFloat(browser.players.count) * (rowHeight + SideBar.playerGap)
                      + (agentHere && !icons ? agentCard + SideBar.playerGap : 0)
                      + (updateHere ? rowHeight + SideBar.playerGap : 0))
 
@@ -318,7 +330,8 @@ struct SideBar: View {
                         .padding(.bottom, SideBar.playerGap)
                         .transition(.opacity)
                 }
-                if let tab = browser.player {
+                // One row for each tab playing out of sight, the newest on top.
+                ForEach(browser.players, id: \.id) { tab in
                     PlayerRow(browser: browser, prefs: prefs, tab: tab)
                         .padding(.horizontal, 10)
                         .padding(.bottom, SideBar.playerGap)
@@ -344,7 +357,9 @@ struct SideBar: View {
                         .modifier(Rise(y: doorsFoot ? 0 : SideBar.footBox - 10))
                         .animation(SideBar.footIn, value: doorsFoot)
                         .frame(height: icons ? nil : doorsFoot ? SideBar.footBox : 0, alignment: .top)
-                        .clipped()
+                        // Room above for the space's name, which shows over
+                        // the rows for a moment after a switch (SpaceDot).
+                        .clipShape(FootClip(headroom: doorsFoot ? SideBar.nameRoom : 0))
                         .transaction(value: doorsFoot) { $0.animation = nil }
                         .allowsHitTesting(doorsFoot)
                         .accessibilityHidden(!doorsFoot)
@@ -438,7 +453,7 @@ struct SideBar: View {
             $0.disablesAnimations = true
         }
         .animation(Motion.quick, value: landing)
-        .animation(Motion.quick, value: browser.player?.id)
+        .animation(Motion.quick, value: browser.players.map(\.id))
         .animation(Motion.glide, value: browser.activeID)
         .animation(Motion.glide, value: browser.editingTab)
         .animation(Motion.settle, value: browser.tabs.map(\.id))
@@ -469,7 +484,7 @@ struct SideBar: View {
             .frame(width: 12)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
-            .resizeEdge { over in onEdge = over }
+            .resizeEdge(release: letGo) { over in onEdge = over }
             .offset(x: onFrame ? 0 : onRight ? -Metrics.cardGap : Metrics.cardGap)
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
@@ -494,6 +509,7 @@ struct SideBar: View {
                         if let live { prefs.sideWidth = live }
                         live = nil
                         grabbed = nil
+                        letGo += 1
                         onDrag(nil)
                     }
             )
@@ -637,7 +653,8 @@ struct SideBar: View {
                     // every space, so it stays put while the rows under it
                     // scroll, and while a swipe brings another space in.
                     if showsMarks {
-                        SideBookmarks(browser: browser, prefs: prefs, bookmarks: browser.bookmarks, compact: icons, lined: marksLined)
+                        SideBookmarks(browser: browser, prefs: prefs, bookmarks: browser.bookmarks, compact: icons, room: width - 20,
+                                      lined: marksLined)
                     }
                     // A row too long for the window scrolls between the pins
                     // and the foot, rather than running under the lights at one
@@ -833,7 +850,7 @@ struct SideBar: View {
                 .padding(.bottom, 10)
             }
             if showsMarks {
-                SideBookmarks(browser: browser, prefs: prefs, bookmarks: browser.bookmarks, compact: icons,
+                SideBookmarks(browser: browser, prefs: prefs, bookmarks: browser.bookmarks, compact: icons, room: width - 20,
                               lined: !keeps || !pinLines.isEmpty || !groups.isEmpty)
                     .allowsHitTesting(false)
             }
@@ -991,7 +1008,10 @@ struct SideBar: View {
     /// The bookmarks bar in the column (SideBookmarks), when it is there.
     private var showsMarks: Bool { prefs.sideBookmarks && !browser.bookmarks.isEmpty }
     private var marksHeight: CGFloat {
-        showsMarks ? SideBookmarks.height(browser.bookmarks.roots.count, row: rowHeight, lined: marksLined) : 0
+        guard showsMarks else { return 0 }
+        let lines = SideBookmarks.lines(browser.bookmarks.roots, tiles: SideBookmarks.tiles(prefs, compact: icons),
+                                        room: width - 20, row: rowHeight)
+        return SideBookmarks.height(lines.count, row: rowHeight, lined: marksLined)
     }
     /// The bookmarks' line under them, unless the keep line comes straight
     /// after: no pinned row, folder or group between (idea 1255). The one
@@ -1134,12 +1154,13 @@ struct SideBar: View {
     private func pinCells(_ count: Int) -> [CGRect] {
         let room = width - 20
         let gap = SideBar.pinGap
-        let fits = Int((room + gap) / (SideBar.square + gap))
+        let square = SideBar.square(roomy: prefs.roomyTabs)
+        let fits = Int((room + gap) / (square + gap))
         let rows = SideBar.pinRows(count, most: min(4, max(1, fits)))
         // A row of fewer than three keeps three places.
         let slots = rows.map { rows.count == 1 ? max($0, min(3, fits)) : $0 }
         let widths = slots.map { max(20, (room - CGFloat($0 - 1) * gap) / CGFloat($0)) }
-        let height = min(SideBar.square, widths.min() ?? SideBar.square)
+        let height = min(square, widths.min() ?? square)
         var cells: [CGRect] = []
         for (row, n) in rows.enumerated() {
             for col in 0..<n {
@@ -1666,7 +1687,7 @@ struct SideBar: View {
         let index = row.index, tab = row.tab
         return rowItem(tab, tabs: browser.tabs, splits: browser.splits,
                        activeID: browser.activeID, interactive: true, pill: pill,
-                       close: { browser.closeTab(tab) })
+                       close: { browser.close(tab) })
             // Positions here are among the loose rows; the pinned block
             // sits in front of them in the real list.
             .modifier(Carried(index: index, steps: looseSteps, vertical: true,
@@ -1731,7 +1752,7 @@ struct SideBar: View {
             ForEach(Array(members.enumerated()), id: \.element.id) { index, tab in
                 rowItem(tab, tabs: browser.tabs, splits: browser.splits,
                         activeID: browser.activeID, interactive: true, pill: pill,
-                        close: { browser.closeTab(tab) })
+                        close: { browser.close(tab) })
                     .padding(.leading, icons ? 0 : 14)
                     .padding(.trailing, inset)
                     .modifier(Carried(index: index, steps: memberSteps, vertical: true,
@@ -1992,7 +2013,7 @@ private struct SideFoot: View {
                 // An agent connected in this window: a click on it is Stop.
                 AgentStatus(browser: browser, style: .icon)
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing, live: live)
-                ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0, puzzle: !prefs.hidesExtensionsDoor, live: live)
+                if !prefs.toolbar { ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0, puzzle: !prefs.hidesExtensionsDoor, live: live) }
                 if !prefs.hidesBookmarksDoor { BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing) }
                 SpaceButtons(browser: browser, vertical: true)
                 if prefs.usesSpaces && !prefs.showsSpaceButtons { SpaceDot(browser: browser) }
@@ -2011,13 +2032,13 @@ private struct SideFoot: View {
                 FetchDoor(browser: browser, fetches: fetches, arrowEdge: .bottom, live: live)
                 if !prefs.hidesBookmarksDoor { BookmarkDoor(browser: browser, arrowEdge: .bottom) }
                 SpaceButtons(browser: browser)
-                ExtensionSlot(browser: browser, edge: .bottom, room: room, puzzle: !prefs.hidesExtensionsDoor, live: live)
+                if !prefs.toolbar { ExtensionSlot(browser: browser, edge: .bottom, room: room, puzzle: !prefs.hidesExtensionsDoor, live: live) }
             }
         } else {
             HStack(spacing: 2) {
                 if prefs.showsProfileDoor { ProfileBadge(browser: browser) }
                 if prefs.usesSpaces && !prefs.showsSpaceButtons { SpaceDot(browser: browser) }
-                ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: room, puzzle: !prefs.hidesExtensionsDoor, live: live)
+                if !prefs.toolbar { ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: room, puzzle: !prefs.hidesExtensionsDoor, live: live) }
                 if !prefs.hidesBookmarksDoor { BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing) }
                 SpaceButtons(browser: browser, squeezes: true)
                 // Only while a download is running, and a moment after.
@@ -2039,7 +2060,7 @@ private struct SideFoot: View {
     /// How many doors the foot has, stacked: what the rows stop short of.
     @MainActor static func doors(_ prefs: Preferences, _ fetches: Fetches, hanging: Bool = false, spaces: Int = 0) -> Int {
         var kept = spaces  // a button per space (SpaceButtons)
-        if !prefs.hidesExtensionsDoor { kept += 1 }  // the puzzle
+        if prefs.footPuzzle { kept += 1 }  // the puzzle
         if !prefs.hidesBookmarksDoor { kept += 1 }
         if prefs.usesSpaces && !prefs.showsSpaceButtons { kept += 1 }  // the dot
         if prefs.showsProfileDoor { kept += 1 }
@@ -2051,7 +2072,7 @@ private struct SideFoot: View {
     /// lights' row must have to take them (SideBar.doorsUp).
     @MainActor static func keptWidth(_ prefs: Preferences, spaces: Int = 0) -> CGFloat {
         var kept = 1 + spaces  // downloads and a button per space
-        if !prefs.hidesExtensionsDoor { kept += 1 }  // the puzzle
+        if prefs.footPuzzle { kept += 1 }  // the puzzle
         if !prefs.hidesBookmarksDoor { kept += 1 }
         if prefs.usesSpaces && !prefs.showsSpaceButtons { kept += 1 }  // the dot
         if prefs.showsProfileDoor { kept += 1 }
@@ -2063,7 +2084,7 @@ private struct SideFoot: View {
     private var room: Int {
         let door: CGFloat = 26 + 2
         var kept = SpaceButtons.count(prefs, browser.spaces)  // the spaces' buttons
-        if !prefs.hidesExtensionsDoor { kept += 1 }  // the puzzle
+        if prefs.footPuzzle { kept += 1 }  // the puzzle
         if !prefs.hidesBookmarksDoor { kept += 1 }
         if prefs.usesSpaces && !prefs.showsSpaceButtons { kept += 1 }  // the dot
         if prefs.showsProfileDoor { kept += 1 }
@@ -2203,7 +2224,7 @@ private struct PinSquare: View, Equatable {
 
     /// The square's grey, as `background` paints it: the unread badge's ring.
     private var squareGround: Color {
-        live ? greys.pinLive : selected ? greys.wash : hovering ? greys.hover : greys.tile
+        live ? greys.pinLive : selected ? greys.wash : hovering ? greys.tileHover : greys.tile
     }
 
     /// The pin's letter: full ink with High contrast text, otherwise the
@@ -2250,7 +2271,7 @@ private struct PinSquare: View, Equatable {
                 } else {
                     RoundedRectangle(cornerRadius: scale * 9 / 34, style: .continuous)
                         .fill(selected ? greys.wash :
-                              hovering ? greys.hover : greys.tile)
+                              hovering ? greys.tileHover : greys.tile)
                 }
             }
             .animation(Motion.quick, value: live)
@@ -2270,6 +2291,12 @@ private struct PinSquare: View, Equatable {
             }
         }
         .animation(Motion.quick, value: peek?.id)
+        // Its page plays sound, or was muted: the icons-only tile's speaker,
+        // in the same corner, a press muting it (idea 1328).
+        .overlay(alignment: .bottomTrailing) {
+            if CornerSpeaker.shows(for: tab), !lettering { CornerSpeaker(tab: tab) }
+        }
+        .animation(Motion.quick, value: CornerSpeaker.shows(for: tab))
         .contentShape(RoundedRectangle(cornerRadius: scale * 9 / 34, style: .continuous))
         .modifier(TabPress(enabled: !lettering && !pickedAmongOthers, active: live, selected: $selectedOnPress, again: { opened in
             // A double-click: home, from this square or another (PinDouble).
@@ -2341,8 +2368,6 @@ private struct SideRow: View, Equatable {
     private let peek: Tab?
     /// Bumped when what was typed in a tab can't be gone to (see Shake).
     private let refusals: Int
-    /// Its cross is a minus: closing it puts its page away (Browser.putsAway).
-    private let putsAway: Bool
     /// In a group, with groups on: a page put away from it stays a row there.
     private let grouped: Bool
 
@@ -2363,7 +2388,6 @@ private struct SideRow: View, Equatable {
         pickedAmongOthers = browser.isPickedAmongOthers(tab)
         peek = browser.peekFrom == tab.id ? browser.peekTab : nil
         refusals = browser.refusals
-        putsAway = browser.putsAway(tab)
         // Another space's row in the map says itself: the browser knows
         // only this space's groups.
         self.grouped = prefs.usesTabGroups && (grouped ?? (browser.group(of: tab) != nil))
@@ -2374,7 +2398,7 @@ private struct SideRow: View, Equatable {
         a.browser === b.browser && a.prefs === b.prefs && a.tab === b.tab && a.live == b.live
             && a.pill == b.pill && a.interactive == b.interactive && a.editing == b.editing
             && a.selected == b.selected && a.pickedAmongOthers == b.pickedAmongOthers
-            && a.peek === b.peek && a.refusals == b.refusals && a.putsAway == b.putsAway
+            && a.peek === b.peek && a.refusals == b.refusals
             && a.grouped == b.grouped
     }
 
@@ -2401,10 +2425,12 @@ private struct SideRow: View, Equatable {
     private var closable: Bool { tab.pin == nil || !tab.asleep }
     /// A grouped tab holding no page — put away with its minus (Browser.putAway),
     /// put to sleep, or not opened since launch: the row stays, dimmed as a
-    /// pin put down is, so the minus is seen to have done something.
+    /// pin put down is, so the minus is seen to have done something. Lit
+    /// under the pointer as any other sleeping row, and as its pill across
+    /// the top is (TabPill.dim, idea 950).
     /// Read from the tab here, not when the column made the row: the column
     /// isn't drawn again when one of its tabs lets its page go.
-    private var putAway: Bool { grouped && tab.asleep && !live }
+    private var putAway: Bool { grouped && tab.asleep && !live && !hovering }
     /// Any other tab asleep, with Settings › Tabs › Dim sleeping tabs on:
     /// faded until the pointer is on it.
     private var dim: Bool { prefs.dimsSleepingTabs && tab.asleep && !live && !hovering && !putAway }
@@ -2453,7 +2479,7 @@ private struct SideRow: View, Equatable {
                     // The page is translated (Translate.swift).
                     TranslateSign(tab: tab, colour: colour)
                     TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
-                                size: prefs.sideTitle, colour: colour, roomy: true, dim: dim)
+                                size: prefs.sideTitle, colour: ink, roomy: true, dim: putAway || dim)
                 }
             }
             // Pushed to the leading edge by its frame, not a Spacer: the
@@ -2519,9 +2545,10 @@ private struct SideRow: View, Equatable {
                 ZStack {
                     if hovering && closable {
                         // A pinned row is put down, not closed (see
-                        // Browser.close), and says so, as Arc's does; so is
-                        // a grouped tab's page while it is open (closeTab).
-                        Image(systemName: tab.pin != nil || (putsAway && !tab.asleep) ? "minus" : "xmark")
+                        // Browser.close), and says so, as Arc's does. A
+                        // grouped tab's cross closes it, as a loose tab's
+                        // does (idea 1412).
+                        Image(systemName: tab.pin != nil ? "minus" : "xmark")
                             .font(.system(size: 8, weight: .semibold))
                             .foregroundStyle(Palette.muted)
                             .frame(width: 15, height: 15)
@@ -2621,13 +2648,15 @@ private struct SideRow: View, Equatable {
         }
     }
 
-    private var colour: Color {
-        if live || prefs.highContrastText {
-            return putAway ? Palette.ink.opacity(0.45) : Palette.ink
-        }
-        let colour = hovering ? Palette.ink.opacity(0.7) : greys.muted
-        return putAway ? colour.opacity(0.45) : colour
+    /// The row's ink, before a put-away row's dim. The title takes that dim
+    /// as a fade of its own (TitleAtRest.dim), as a sleeping title does,
+    /// since the ink changes at once under the pointer.
+    private var ink: Color {
+        if live || prefs.highContrastText { return Palette.ink }
+        return hovering ? Palette.ink.opacity(0.7) : greys.muted
     }
+
+    private var colour: Color { putAway ? ink.opacity(0.45) : ink }
 }
 
 /// A row that is an action rather than a page. Quiet until the pointer is on it.
@@ -2946,6 +2975,17 @@ private struct EndInset: ViewModifier, Animatable {
     var bottom: CGFloat
     var animatableData: CGFloat { get { bottom } set { bottom = newValue } }
     func body(content: Content) -> some View { content.padding(.bottom, bottom) }
+}
+
+/// The foot's clip, with the air above it where the space's name shows for
+/// a moment after a switch. Cut to its own height alone, the foot took the
+/// name's capsule away and left the shadow it cast behind, lying flat
+/// across the doors (SpaceDot).
+private struct FootClip: Shape {
+    var headroom: CGFloat
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(x: rect.minX, y: rect.minY - headroom, width: rect.width, height: rect.height + headroom))
+    }
 }
 
 /// Down by y, drawn again on every frame of a change to it.

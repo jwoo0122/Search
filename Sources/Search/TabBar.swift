@@ -538,7 +538,7 @@ struct TabBar: View {
         } else {
             TabPill(browser: browser, prefs: browser.prefs, tab: tab,
                     live: tab.id == activeID, width: width, room: room, pill: pill,
-                    close: interactive ? { hold(width); browser.closeTab(tab) } : {})
+                    close: interactive ? { hold(width); browser.close(tab) } : {})
         }
     }
 
@@ -1005,12 +1005,10 @@ private struct TabPill: View, Equatable {
     private var dim: Bool {
         (prefs.dimsSleepingTabs || browser.group(of: tab) != nil) && tab.asleep && !live && !hovering
     }
-    /// Its cross is a minus in a group, as in the column: closing it puts
-    /// its page away and leaves the tab (Browser.closeTab). Read here, not
-    /// when the row made the pill: the pill isn't made again when the tab
-    /// lets its page go, and the cross only shows under the pointer.
-    private var crossSymbol: String { browser.putsAway(tab) ? "minus" : "xmark" }
-    private var crossHelp: String { browser.putsAway(tab) ? "Put Away" : "Close Tab" }
+    /// Its cross closes it, in a group as anywhere (idea 1412); putting a
+    /// grouped tab's page away is ⌘W and the tab's menu.
+    private var crossSymbol: String { "xmark" }
+    private var crossHelp: String { "Close Tab" }
 
     /// A pinned tab is a square, an edited one is a field, everything else is
     /// its share of what is left.
@@ -1046,10 +1044,16 @@ private struct TabPill: View, Equatable {
                 // What its page counts as waiting (UnreadBadge): a pin shows
                 // no title to say it in.
                 .unreadBadge(prefs.showsPinCounts && !lettering && shortcutNumbers[tab.id] == nil ? tab.unread : nil, icon: 16,
-                             ring: live ? greys.pinLive : selected ? greys.wash : hovering ? greys.hover : greys.tile)
+                             ring: live ? greys.pinLive : selected ? greys.wash : hovering ? greys.tileHover : greys.tile)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 6)
                 .frame(width: span)
+                // Its page plays sound, or was muted: the icons-only tile's
+                // speaker, in the same corner, a press muting it (idea 1328).
+                .overlay(alignment: .bottomTrailing) {
+                    if CornerSpeaker.shows(for: tab), !lettering { CornerSpeaker(tab: tab) }
+                }
+                .animation(Motion.quick, value: CornerSpeaker.shows(for: tab))
             } else {
                 loose
             }
@@ -1269,8 +1273,10 @@ private struct TabPill: View, Equatable {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(greys.wash)
         } else if hovering {
+            // A square rests on the tile grey, which the plain hover is no
+            // darker than: it takes the step above it (Greys.tileHover).
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(greys.hover)
+                .fill(pinned ? greys.tileHover : greys.hover)
         } else if pinned || compact || rowCarrying {
             // A letter with nothing behind it reads as debris. A pinned tab
             // keeps a faint ground of its own so the block of them reads as

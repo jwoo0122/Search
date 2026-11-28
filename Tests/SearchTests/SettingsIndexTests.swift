@@ -32,6 +32,24 @@ final class SettingsIndexTests: XCTestCase {
         }
     }
 
+    /// Plain words on the rows (idea 1411): the jargon is out of the titles and
+    /// details, and the old words still find the rows.
+    func testPlainWordsAndTheOldOnesStillFind() {
+        let jargon = ["socket", "CSS", "keychain", "cross-site", "Global Privacy Control", "http://", "Liquid Glass that"]
+        for item in SettingsIndex.items {
+            for word in jargon {
+                XCTAssertFalse((item.title + " " + item.detail).localizedCaseInsensitiveContains(word), "\(item.id): \(word)")
+            }
+        }
+        for (words, id) in [("cross-site", "sites.keep"), ("itp", "sites.keep"), ("gclid", "privacy.clickIDs"),
+                            ("global privacy control", "privacy.gpc"), ("socket", "bench"), ("css", "sites.styles"),
+                            ("keychain", "passwords.open"), ("https", "privacy.httpsFirst")] {
+            // A row for a feature this Mac's WebKit lacks isn't listed at all.
+            guard SettingsIndex.item(id) != nil else { continue }
+            XCTAssertTrue(SettingsIndex.find(words).contains { $0.id == id }, words)
+        }
+    }
+
     func testOldSectionNames() {
         XCTAssertEqual(SettingsPanel.Page.named("shortcuts"), .keyboard)
         XCTAssertEqual(SettingsPanel.Page.named("downloads"), .general)
@@ -42,7 +60,7 @@ final class SettingsIndexTests: XCTestCase {
         fresh {
             let prefs = Preferences()
             XCTAssertTrue(prefs.pinsKeepSite)
-            XCTAssertEqual(prefs.fastPages, .onPower)
+            XCTAssertEqual(prefs.fastPages, .never)
             XCTAssertTrue(prefs.holdsHistory)
             XCTAssertTrue(prefs.showsAddress)
             XCTAssertEqual(prefs.sleepChoice, .normal)
@@ -52,6 +70,19 @@ final class SettingsIndexTests: XCTestCase {
             for key in ["pins.home", "pins.peek", "pages.120.mode", "swipe.history", "tabs.address"] {
                 XCTAssertNil(Store.settings.object(forKey: key), key)
             }
+        }
+    }
+
+    /// The loading line (27 Nov 2026): off, however 1.0.21 or 1.0.22 left
+    /// things; only a switch turned on by hand counts.
+    func testLoadingLineOffUnlessTurnedOn() {
+        fresh {
+            XCTAssertFalse(Preferences().showsLoadingLine)
+            XCTAssertNil(Store.settings.object(forKey: "fold.loadingLine"), "nothing written for the default")
+            Store.settings.set(false, forKey: "fold.loadingLine")
+            XCTAssertFalse(Preferences().showsLoadingLine)
+            Store.settings.set(true, forKey: "fold.loadingLine")
+            XCTAssertTrue(Preferences().showsLoadingLine, "turned on by hand, it stays on")
         }
     }
 
@@ -152,6 +183,87 @@ final class SettingsIndexTests: XCTestCase {
         }
     }
 
+    /// Settings cut in half (Drice, 27 Nov 2026): 163 rows before. At most
+    /// half of them on the pages, and about 110 with every page's Advanced
+    /// open. A budget: a row added past it takes one out.
+    func testHalfAsLong() {
+        let drawn = SettingsIndex.drawn
+        let shown = drawn.filter { !$0.advanced }
+        XCTAssertLessThanOrEqual(shown.count, 163 / 2, "rows on the pages")
+        XCTAssertLessThanOrEqual(drawn.count, 112, "rows with Advanced open")
+        // Each page's Advanced holds what it says.
+        for page in SettingsPanel.Page.allCases {
+            XCTAssertTrue(SettingsIndex.advanced(of: page).allSatisfy { $0.advanced && $0.page == page && $0.within == nil })
+            for group in SettingsIndex.groups(of: page) {
+                XCTAssertTrue(SettingsIndex.items(in: group.id).allSatisfy { !$0.advanced && $0.within == nil })
+            }
+        }
+    }
+
+    /// A line of a row that holds several: its row is real, drawn, wide, on
+    /// the same page and as advanced; and the find field still finds the line.
+    func testLinesSitInARealRow() {
+        let lined = SettingsIndex.items.filter { $0.within != nil }
+        XCTAssertFalse(lined.isEmpty)
+        for line in lined {
+            let row = SettingsIndex.item(line.within!)
+            XCTAssertNotNil(row, line.id)
+            XCTAssertEqual(row?.kind, .wide, line.id)
+            XCTAssertEqual(row?.page, line.page, line.id)
+            XCTAssertEqual(row?.advanced, line.advanced, line.id)
+            XCTAssertNil(row?.within, line.id)
+            XCTAssertFalse(line.findOnly, line.id)
+            // By the words of its title (a key's symbol alone isn't a word).
+            let words = line.title.split(separator: " ").filter { $0.allSatisfy { $0.isLetter || $0 == "'" } }.joined(separator: " ")
+            XCTAssertTrue(SettingsIndex.find(words).contains { $0.id == line.id }, line.id)
+        }
+        // Every row of lines has some.
+        for row in SettingsIndex.drawn where row.keys.isEmpty && row.kind == .wide && row.advanced {
+            XCTAssertFalse(SettingsIndex.lines(of: row.id).isEmpty, row.id)
+        }
+    }
+
+    /// The switches taken out are gone from the pages but the find field
+    /// still says they are always there, or finds them in their menu.
+    func testRetiredSwitchesAreFoundAsAlwaysOn() {
+        for id in ["sidebar.player", "tabs.undoReopens", "meet.pip", "video.keys", "pins.keep", "commandbar",
+                   "updates.notice", "newtab.recent", "sidebar.narrowIcons"] {
+            let item = SettingsIndex.item(id)
+            XCTAssertEqual(item?.kind, .note, id)
+            XCTAssertEqual(item?.findOnly, true, id)
+            XCTAssertTrue(SettingsIndex.find(item?.title ?? "").contains { $0.id == id }, id)
+        }
+        for id in ["tabs.reading", "tabs.give", "reader.twins", "field.hidesPage", "tabs.clickAddressOnly", "pages.bounce"] {
+            XCTAssertNil(SettingsIndex.item(id), id)
+        }
+        XCTAssertTrue(SettingsIndex.find("export spaces").contains { $0.id == "general.exportSpaces" })
+    }
+
+    /// Home background: Off, Solid colour, Gradient and Image. A wall or the
+    /// stickers left by an earlier build reads as Off, and its line stays.
+    func testRetiredHomeThemesReadAsOff() {
+        XCTAssertEqual(HomeTheme.Family.allCases.map(\.title), ["Off", "Solid colour", "Gradient", "Image"])
+        for name in ["openRoad", "monsoonForest", "stickers"] {
+            XCTAssertEqual(HomeTheme.stored(name), .off, name)
+        }
+        XCTAssertEqual(HomeTheme.stored("gradient"), .gradient)
+        XCTAssertNil(HomeTheme.stored("not-a-theme"))
+        let keys = ["home.theme", "home.shuffle", "home.tuning"]
+        let saved = keys.map { ($0, Store.settings.object(forKey: $0)) }
+        defer { for (key, value) in saved { Store.settings.set(value, forKey: key) } }
+        Store.settings.set("stickers", forKey: "home.theme")
+        Store.settings.set(true, forKey: "home.shuffle")
+        Store.settings.set(#"{"pack":"ocean","intensity":0.5}"#, forKey: "home.tuning")
+        let prefs = Preferences()
+        XCTAssertEqual(prefs.homeTheme, .off)
+        XCTAssertFalse(HomeBackground.behind(prefs))
+        prefs.reread()
+        XCTAssertEqual(prefs.homeTheme, .off)
+        XCTAssertEqual(Store.settings.string(forKey: "home.theme"), "stickers", "the line is left as it was")
+        XCTAssertEqual(Store.settings.object(forKey: "home.shuffle") as? Bool, true)
+        XCTAssertEqual(prefs.homeTuning.pack, .ocean, "the pack is still read, so it is written back with the rest")
+    }
+
     func testFindByWords() {
         XCTAssertTrue(SettingsIndex.find("vertical tabs").contains { $0.id == "tabs.layout" })
         XCTAssertTrue(SettingsIndex.find("pip").contains { $0.id == "float.own" })
@@ -159,6 +271,21 @@ final class SettingsIndexTests: XCTestCase {
         XCTAssertTrue(SettingsIndex.find("spelling").contains { $0.id == "autocorrect" })
         XCTAssertTrue(SettingsIndex.find("split").contains { $0.id == "note.split" })
         XCTAssertTrue(SettingsIndex.find("shift enter").contains { $0.id == "search.shift" })
+        // Under Advanced, or a line of a row of several, still found.
+        XCTAssertTrue(SettingsIndex.find("middle button").contains { $0.id == "autoscroll" })
+        XCTAssertTrue(SettingsIndex.find("liquid glass").contains { $0.id == "tabs.liquid" })
+        XCTAssertTrue(SettingsIndex.find("double click rename").contains { $0.id == "tabs.clickRenames" })
+        XCTAssertTrue(SettingsIndex.find("backspace").contains { $0.id == "keys.backspaceBack" })
+        XCTAssertTrue(SettingsIndex.find("smooth scrolling").contains { $0.id == "wheel.smooth" && $0.advanced && $0.within == "mouse.habits" })
+        XCTAssertTrue(SettingsIndex.find("site tiles").contains { $0.id == "home.tiles" })
+        // The loading line: a visible switch on Appearance, found by its words.
+        for word in ["loading", "progress", "line", "loading line"] {
+            XCTAssertTrue(SettingsIndex.find(word).contains { $0.id == "fold.loadingLine" }, word)
+        }
+        let line = SettingsIndex.items.first { $0.id == "fold.loadingLine" }
+        XCTAssertEqual(line?.page, .appearance)
+        XCTAssertEqual(line?.advanced, false, "not buried in Advanced")
+        XCTAssertTrue(SettingsIndex.find("advanced").isEmpty == false)
         XCTAssertTrue(SettingsIndex.find("").isEmpty)
         XCTAssertTrue(SettingsIndex.find("zzzz nothing").isEmpty)
     }
